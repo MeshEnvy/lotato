@@ -1,0 +1,9 @@
+[submodule "meshtastic"]
+	path = meshtastic
+	url = https://github.com/meshtastic/firmware
+[submodule "meshcore"]
+	path = meshcore
+	url = https://github.com/meshcore-dev/MeshCore
+[submodule "potato-mesh"]
+	path = potato-mesh
+	url = https://github.com/l5yth/potato-mesh
