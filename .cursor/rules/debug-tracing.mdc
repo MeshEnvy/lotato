@@ -1,0 +1,24 @@
+---
+description: Add debug tracing for meaningful code changes
+alwaysApply: true
+---
+
+# Debug tracing on meaningful changes
+
+When you make **meaningful** changes (new behavior, nontrivial fixes, new commands, protocol or ingest paths, concurrency, or anything you would want to diagnose in the field), **add concise debug tracing** so failures and flows are visible on serial/logs without guessing.
+
+## MeshCore / potato-mesh firmware (ESP32)
+
+- Use **`POTATO_MESH_DBG` / `POTATO_MESH_DBG_LN`** from `helpers/esp32/PotatoMeshDebug.h` (respects `/debug` / `PotatoMeshConfig::debugEnabled()` unless `POTATO_MESH_DEBUG` compile-time is on).
+- Prefix messages with a **short scope**, e.g. `admin /wifi:`, `potato ingest:`, so logs are grep-friendly.
+- Log **decisions and outcomes**: entry (who/what), key parameters (never secrets—no tokens, no passwords), error paths, and completion (sizes, counts, return codes).
+- Prefer one line per major step; avoid chatty loops unless diagnosing a specific bug.
+- **BLE + WiFi (companion radio):** do not call `WiFi.setSleep(false)` to “help” scans; ESP-IDF **aborts** with *Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled*.
+
+## Other code in this repo
+
+- Follow the project’s existing logger or `Serial` pattern; same rules: **no secrets**, scope prefix, outcome-oriented lines.
+
+## When *not* to add tracing
+
+- Pure renames, comment-only edits, or one-line mechanical edits with no behavior change.
