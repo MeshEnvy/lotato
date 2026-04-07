@@ -1,0 +1,9 @@
+---
+description: Default MeshCore WiFi-capable PlatformIO test environment
+alwaysApply: true
+---
+
+# MeshCore test device
+
+- **WiFi-capable reference build:** `Heltec_v3_companion_radio_ble` (Heltec LoRa32 v3 companion radio over BLE, with WiFi STA used for potato-mesh HTTP ingest).
+- When building, flashing, or validating MeshCore firmware changes in this repo—especially potato-mesh ingest or ESP32 companion behavior—**prefer** `pio run -e Heltec_v3_companion_radio_ble` and `pio run -e Heltec_v3_companion_radio_ble -t upload` unless another env is explicitly required.
