@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+import "nanopb.proto";
+
+// LoDB `mesh_nodes` row: persisted mesh advert snapshot for Lotato ingest.
+message LotatoMeshNode {
+  bytes pub_key = 1 [(nanopb).max_size = 32];
+  bytes name = 2 [(nanopb).max_size = 32];
+  uint32 type = 3;
+  uint32 last_advert = 4;
+  int32 gps_lat = 5;
+  int32 gps_lon = 6;
+  uint32 magic = 7;
+}

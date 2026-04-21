@@ -6,14 +6,17 @@
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <lodb/LoDB.h>
 
-/** Maximum number of nodes persisted to SPIFFS. Override via build flag. */
+#include "lotato_mesh_node.pb.h"
+
+/** Maximum number of nodes tracked for ingest. Override via build flag. */
 #ifndef LOTATO_NODE_STORE_MAX
 #define LOTATO_NODE_STORE_MAX 4000
 #endif
 
 /**
- * On-disk record per node. Fixed size: 84 bytes.
+ * In-memory / wire record per node. Fixed size: 84 bytes.
  * magic == LOTATO_NODE_MAGIC when the slot is occupied.
  */
 struct LotatoNodeRecord {
@@ -31,31 +34,21 @@ static_assert(sizeof(LotatoNodeRecord) == 84, "LotatoNodeRecord layout changed")
 #define LOTATO_NODE_MAGIC 0x4C4F5441u
 
 /**
- * Persistent node store for Lotato ingest on SPIFFS (/lotato-nodes.bin).
+ * Persistent node store for Lotato ingest, backed by LoDB on `/__ext__` (LittleFS on ESP32).
  *
- * On-disk **dense** layout: 8-byte header + occupancy bitmap + one 84-byte record per
- * occupied logical slot (in slot order). Empty slots omit records, so disk use scales with
- * how many nodes are stored (plus a fixed bitmap, ~(MAX/8) bytes).
- *
- * If `/lotato-nodes.bin` does not start with the dense magic sentinel, it is removed on boot
- * and replaced with an empty store (no legacy flat format).
- *
- * An in-memory index tracks {pub_key prefix, last_advert, last_posted_ms} for fast dedup,
- * LRU eviction, and ingest scheduling. Scheduling throttles off `millis()`, not wall
- * clock, so it works even before NTP. The `ingest_ttl` LoDB table on the `/__ram__`
- * ramdisk is kept for introspection only and is wiped on reboot.
+ * An in-memory index tracks {LoDB uuid, pub_key prefix, last_advert, last_posted_ms} for fast
+ * dedup, LRU eviction, and ingest scheduling. Scheduling throttles off `millis()`, not wall
+ * clock, so it works even before NTP. The `ingest_ttl` LoDB table on `/__ram__` is kept for
+ * introspection only and is wiped on reboot.
  */
 class LotatoNodeStore {
 public:
   static constexpr int    MAX         = LOTATO_NODE_STORE_MAX;
   static constexpr size_t RECORD_SIZE = sizeof(LotatoNodeRecord);
-  /** Occupancy bitmap size in bytes (one bit per logical slot). */
-  static constexpr size_t BITMAP_BYTES = (MAX + 7) / 8;
-  static constexpr const char* PATH   = "/lotato-nodes.bin";
 
   /**
-   * Open (or create) the node file. Must be called after SPIFFS.begin().
-   * Rebuilds the in-memory index from disk on first call.
+   * Register LoDB tables and rebuild the in-memory index from disk.
+   * @param fs optional: if set, removes orphaned `/lotato-nodes.bin` / `.tmp` from pre-LoDB builds.
    */
   void begin(fs::FS* fs);
 
@@ -72,7 +65,7 @@ public:
   /** Record successful POST at @p now_ms (`millis()`); also updates RAM-TTL for introspection. */
   void markPosted(int slot, uint32_t now_ms);
 
-  /** Read the full on-disk record for slot. Returns false on I/O error. */
+  /** Read the persisted record for slot. Returns false on I/O error. */
   bool readRecord(int slot, LotatoNodeRecord& out) const;
 
   /** Total number of occupied slots. */
@@ -84,7 +77,7 @@ public:
   /** Remove stale slots not mesh-heard for `lotato.ingest.gc_stale_secs` (no-op if wall clock invalid). */
   void gcSweepStale();
 
-  /** Remove one occupied slot from SPIFFS + index + ingest TTL. */
+  /** Remove one occupied slot from LoDB + index + ingest TTL. */
   bool removeSlot(int slot);
 
   /** Count occupied slots that pass the mesh-heard visibility window. */
@@ -103,20 +96,28 @@ private:
   bool visibleMeshHeard(int slot) const;
 
   struct Entry {
-    uint8_t  key[4];         // first 4 bytes of pub_key for fast match
-    uint32_t last_advert;    // cached last_advert for LRU eviction
-    uint32_t last_posted_ms; // millis() of last successful post; 0 = never posted (or flushed)
+    lodb_uuid_t uuid{};
+    uint8_t     key[4];         // first 4 bytes of pub_key for fast match
+    uint32_t    last_advert;    // cached last_advert for LRU eviction
+    uint32_t    last_posted_ms; // millis() of last successful post; 0 = never posted (or flushed)
   };
 
-  fs::FS* _fs = nullptr;
   int     _count = 0;
   Entry   _index[MAX]{};
   mutable SemaphoreHandle_t _idx_mtx = nullptr;
 
+  LoDb     _db{"lotato", "/__ext__"};
+  bool     _registered = false;
+
+  static lodb_uuid_t rowUuid(const uint8_t pub_key[32]);
+  static void        pubKeyToUuidInput(const uint8_t pub_key[32], char hex_out[65]);
+  static bool        recordToPb(const LotatoNodeRecord& rec, LotatoMeshNode* out);
+  static bool        pbToRecord(const LotatoMeshNode& in, LotatoNodeRecord& out);
+
   int  findSlot(const uint8_t* pub_key) const;
   int  findEmptySlot() const;
   int  evictLRU();
-  bool writeRecord(int slot, const LotatoNodeRecord& rec);
+  bool persistRecord(const LotatoNodeRecord& rec);
   void loadIndex();
 };
 
