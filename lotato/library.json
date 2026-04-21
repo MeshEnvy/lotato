@@ -19,8 +19,7 @@
   "build": {
     "libArchive": false,
     "srcDir": ".",
-    "srcFilter": ["+<*.cpp>", "+<*.c>"],
-    "flags": ["-D PB_FIELD_32BIT=1"],
+    "srcFilter": ["+<*.cpp>", "+<*.c>", "+<platforms/meshcore/*.cpp>"],
     "extraScript": "extra_script.py"
   }
 }
