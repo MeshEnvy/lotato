@@ -1,0 +1,46 @@
+---
+description: Lotato ingest architecture — providers vs mesh forks (greenfield)
+globs: lotato/**/*
+alwaysApply: false
+---
+
+# Lotato and mesh fork boundaries
+
+**What Lotato is:** A platform-agnostic, **on-device** potato-mesh ingestor (no sidecar) for Meshtastic and MeshCore. It targets ESP32 and any other **WiFi-capable** platform.
+
+**Greenfield:** No data migration, no legacy compatibility, and **large breaking refactors are acceptable** when they simplify the design.
+
+## Where logic belongs
+
+| Layer | Put here |
+|-------|----------|
+| Protocol-specific ingest, framing, mapping to potato-mesh HTTP/payloads, most WiFi/client glue | `lotato/providers/meshtastic/` and `lotato/providers/meshcore/` (or equivalent under `lotato/providers/mesh*`) |
+| Forks (`meshtastic/`, `meshcore/`) | **Only** what must live there for **build, link, or platform HAL** reasons—thin wire-up, includes, build flags, a small adapter surface |
+
+## Rules of thumb
+
+- **Prefer new code in `lotato/`** (especially under `lotato/providers/`) over spreading changes through upstream-shaped trees.
+- In forks, aim for **minimal diffs**: registration, one or two call sites, optional weak hooks—**not** business logic that could live in a provider.
+- **Cross-platform:** isolate RTOS/SDK/Arduino specifics in **platform-specific providers** or small shims; keep shared ingest logic portable.
+- When you are editing **`meshcore/` or `meshtastic/`** for ingest or Lotato integration, **still** follow this split—move logic into `lotato/providers/` when it is not strictly required in the fork.
+
+## Examples
+
+```cpp
+// ❌ BAD — full ingest / JSON / HTTP flow inside meshcore/src/...
+void onSomeRadioEvent() {
+  // ... lots of potato-mesh-specific code ...
+}
+
+// ✅ GOOD — fork: delegate
+void onSomeRadioEvent() {
+  lotato::meshcore::Provider::onRadioEvent(ctx, event);
+}
+
+// ✅ GOOD — provider: real work in lotato/providers/meshcore/...
+```
+
+```cpp
+// ❌ BAD — Meshtastic module owns potato payload shaping
+// ✅ GOOD — meshtastic calls into lotato::meshtastic::Provider with a narrow API
+```
