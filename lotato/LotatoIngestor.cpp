@@ -146,7 +146,7 @@ constexpr size_t kBatchMaxSlots = LOTATO_INGEST_BATCH_MAX_SLOTS;
 char g_batch_body[kBodyCap]{};
 uint16_t g_batch_len = 0;
 uint8_t g_batch_n = 0;
-uint16_t g_batch_slots[kBatchMaxSlots]{};
+uint8_t g_batch_keys[kBatchMaxSlots][32]{};
 char g_batch_node_ids[kBatchMaxSlots][12]{};
 LotatoNodeStore* g_batch_store = nullptr;
 uint8_t g_batch_self_pk[lotato::ingest_platform::kPublicKeyBytes]{};
@@ -416,62 +416,74 @@ static bool build_record_ingest_json(const uint8_t self_pub_key[lotato::ingest_p
   return true;
 }
 
+struct BatchBuildCtx {
+  LotatoNodeStore* store;
+  const uint8_t*   self_pk;
+  uint32_t         now_ms;
+  uint16_t         merged_len;
+  uint8_t          n;
+  char             batch_ids[kBatchMaxSlots][12];
+  uint8_t          batch_keys[kBatchMaxSlots][32];
+};
+
+static void batch_build_visit(const uint8_t pub_key[32], void* user) {
+  auto* ctx = static_cast<BatchBuildCtx*>(user);
+  if (ctx->n >= kBatchMaxSlots) return;
+  if (!ctx->store->dueForIngest(pub_key, ctx->now_ms)) return;
+  LotatoNodeRecord rec{};
+  if (!ctx->store->readRecord(pub_key, rec)) return;
+
+  char nid[12];
+  uint16_t flen = 0;
+  if (!build_record_ingest_json(ctx->self_pk, rec, g_build_frag, sizeof(g_build_frag), &flen, nid)) return;
+
+  if (ctx->n == 0) {
+    memcpy(g_build_merged, g_build_frag, flen + 1);
+    ctx->merged_len = flen;
+    memcpy(ctx->batch_ids[0], nid, 12);
+    memcpy(ctx->batch_keys[0], pub_key, 32);
+    ctx->n = 1;
+    return;
+  }
+  uint16_t new_len = 0;
+  if (!merge_ingest_bodies(g_build_merged, g_build_frag, flen, g_build_merge_tmp, sizeof(g_build_merge_tmp), &new_len))
+    return;
+  memcpy(g_build_merged, g_build_merge_tmp, new_len + 1);
+  ctx->merged_len = new_len;
+  memcpy(ctx->batch_ids[ctx->n], nid, 12);
+  memcpy(ctx->batch_keys[ctx->n], pub_key, 32);
+  ctx->n++;
+}
+
 /** Fill g_batch_* from store (caller holds g_q_mtx). */
 static void try_build_batch_from_store(LotatoNodeStore& store,
                                        const uint8_t self_pk[lotato::ingest_platform::kPublicKeyBytes]) {
   if (g_batch_len > 0) return;
 
-  char batch_ids[kBatchMaxSlots][12];
-  uint16_t merged_len = 0;
-  uint8_t n = 0;
-  uint16_t slots[kBatchMaxSlots];
-  uint32_t now_ms = millis();
+  BatchBuildCtx ctx{};
+  ctx.store   = &store;
+  ctx.self_pk = self_pk;
+  ctx.now_ms  = millis();
+  store.forEachPubKey(batch_build_visit, &ctx);
 
-  for (int slot = 0; slot < LotatoNodeStore::MAX; slot++) {
-    if (!store.dueForIngest(slot, now_ms)) continue;
-    LotatoNodeRecord rec{};
-    if (!store.readRecord(slot, rec)) continue;
-    char nid[12];
-    uint16_t flen = 0;
-    if (!build_record_ingest_json(self_pk, rec, g_build_frag, sizeof(g_build_frag), &flen, nid)) continue;
+  if (ctx.n == 0) return;
 
-    if (n == 0) {
-      memcpy(g_build_merged, g_build_frag, flen + 1);
-      merged_len = flen;
-      memcpy(batch_ids[0], nid, 12);
-      slots[0] = (uint16_t)slot;
-      n = 1;
-      continue;
-    }
-    if (n >= kBatchMaxSlots) break;
-    uint16_t new_len = 0;
-    if (!merge_ingest_bodies(g_build_merged, g_build_frag, flen, g_build_merge_tmp, sizeof(g_build_merge_tmp),
-                             &new_len))
-      break;
-    memcpy(g_build_merged, g_build_merge_tmp, new_len + 1);
-    merged_len = new_len;
-    memcpy(batch_ids[n], nid, 12);
-    slots[n] = (uint16_t)slot;
-    n++;
-  }
-
-  if (n == 0) return;
-
-  memcpy(g_batch_body, g_build_merged, merged_len + 1);
-  g_batch_len = merged_len;
-  g_batch_n = n;
-  memcpy(g_batch_slots, slots, n * sizeof(uint16_t));
-  for (uint8_t i = 0; i < n; i++) memcpy(g_batch_node_ids[i], batch_ids[i], 12);
+  memcpy(g_batch_body, g_build_merged, ctx.merged_len + 1);
+  g_batch_len = ctx.merged_len;
+  g_batch_n = ctx.n;
+  memcpy(g_batch_keys, ctx.batch_keys, ctx.n * sizeof(g_batch_keys[0]));
+  for (uint8_t i = 0; i < ctx.n; i++) memcpy(g_batch_node_ids[i], ctx.batch_ids[i], 12);
   memcpy(g_batch_self_pk, self_pk, lotato::ingest_platform::kPublicKeyBytes);
   g_batch_store = &store;
   if (::lolog::LoLog::isVerbose()) {
-    ::lolog::LoLog::debug("lotato", "lotato ingest: built batch %u nodes %u bytes", (unsigned)n, (unsigned)merged_len);
+    ::lolog::LoLog::debug("lotato", "lotato ingest: built batch %u nodes %u bytes", (unsigned)ctx.n,
+                          (unsigned)ctx.merged_len);
   }
 }
 
 bool ingest_try_step() {
   static char local_body[kBodyCap];
-  static uint16_t local_slots[kBatchMaxSlots];
+  static uint8_t local_keys[kBatchMaxSlots][32];
   uint16_t local_len = 0;
   uint8_t local_n = 0;
   LotatoNodeStore* local_store = nullptr;
@@ -508,7 +520,7 @@ bool ingest_try_step() {
   local_len = g_batch_len;
   memcpy(local_body, g_batch_body, local_len + 1);
   local_n = g_batch_n;
-  memcpy(local_slots, g_batch_slots, local_n * sizeof(uint16_t));
+  memcpy(local_keys, g_batch_keys, local_n * sizeof(local_keys[0]));
   local_store = g_batch_store;
   for (uint8_t i = 0; i < local_n; i++) memcpy(batch_ids[i], g_batch_node_ids[i], 12);
   memcpy(local_self_pk, g_batch_self_pk, lotato::ingest_platform::kPublicKeyBytes);
@@ -525,7 +537,7 @@ bool ingest_try_step() {
     uint32_t posted_ms = millis();
     if (local_store) {
       for (uint8_t i = 0; i < local_n; i++) {
-        local_store->markPosted(local_slots[i], posted_ms);
+        local_store->markPosted(local_keys[i], posted_ms);
       }
     }
     g_batch_len = 0;

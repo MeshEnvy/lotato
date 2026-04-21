@@ -11,7 +11,7 @@
  *
  * Backed by LoDB mounted on the `/__ram__` ramdisk: every entry is RAM-only and
  * wiped on reboot. This is intentional — after power cycle, the ingest worker
- * should treat every occupied node-store slot as "never posted" and mirror it
+ * should treat every tracked node as "never posted" and mirror it
  * again. Refresh cadence / OCC throttling within a single uptime still works.
  */
 class LotatoIngestTtlStore {

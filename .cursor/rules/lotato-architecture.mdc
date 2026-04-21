@@ -10,6 +10,45 @@ alwaysApply: false
 
 **Greenfield:** No data migration, no legacy compatibility, and **large breaking refactors are acceptable** when they simplify the design.
 
+## Zero legacy code
+
+Lotato has **never shipped**. There are no deployed devices, no stored user data that matters, no external callers. Treat every refactor as if the old shape never existed.
+
+**Do not add any of the following, ever:**
+
+- Runtime cleanup of old files, old table names, old schemas (e.g. `fs->remove("/lotato-nodes.bin")`, "drop old table", "rename column X to Y on boot").
+- Compatibility shims, adapter methods, or "old API kept for callers that still pass a slot index".
+- Parameters retained "just in case" — if a field/arg is unused after the refactor, **delete it at every call site**.
+- Comments like "legacy", "pre-LoDB", "for backwards compat", "leftover from …" describing on-device behavior. If it's not needed, **remove the code**, don't annotate it.
+- `#ifdef`-gated old paths, dual reads/writes, or dual-schema support.
+
+**When you refactor a store / schema / API:**
+
+1. Change the shape.
+2. Update every caller to the new shape in the same change.
+3. Delete the old fields, old files, old code paths. Do **not** add migration logic. If a dev device has stale data, they can wipe flash — that is an acceptable outcome.
+
+**If you catch yourself writing cleanup/migration code, stop.** Delete it and move on. The answer is always "the old thing never existed".
+
+**Example — BAD (do not write this):**
+
+```cpp
+void Store::begin(fs::FS* fs) {
+  // clean up orphaned pre-LoDB files
+  if (fs->exists("/lotato-nodes.bin")) fs->remove("/lotato-nodes.bin");
+  if (fs->exists("/lotato-nodes.bin.tmp")) fs->remove("/lotato-nodes.bin.tmp");
+  ...
+}
+```
+
+**Example — GOOD:**
+
+```cpp
+void Store::begin() {
+  ...
+}
+```
+
 ## Nanopb (Lotato LoDB rows)
 
 - **Sources of truth:** `lotato/*.proto` (e.g. `lotato_ingest_ttl.proto`, `lotato_mesh_node.proto`).

@@ -136,7 +136,7 @@ void LotatoConfig::registerConfigSchema() {
        0,
        259200u,
        nullptr,
-       "Remove store slots not mesh-heard for this long (>= visibility_secs)",
+       "Remove nodes not mesh-heard for this long (>= visibility_secs)",
        false,
        true,
        300u,

@@ -16,6 +16,12 @@ constexpr uint64_t kUuidSaltMeshNode = 0x4c6f744e6f646573ull; // 'LotNods'
 
 }  // namespace
 
+LotatoNodeStore::PubKey32 LotatoNodeStore::toKey(const uint8_t pub_key[32]) {
+  PubKey32 k{};
+  memcpy(k.b, pub_key, 32);
+  return k;
+}
+
 void LotatoNodeStore::pubKeyToUuidInput(const uint8_t pub_key[32], char hex_out[65]) {
   static const char* hx = "0123456789abcdef";
   for (int i = 0; i < 32; i++) {
@@ -64,133 +70,99 @@ bool LotatoNodeStore::pbToRecord(const LotatoMeshNode& in, LotatoNodeRecord& rec
   return true;
 }
 
-void LotatoNodeStore::begin(fs::FS* fs) {
+void LotatoNodeStore::begin() {
   if (!_idx_mtx) _idx_mtx = xSemaphoreCreateMutex();
-  _count = 0;
-  memset(_index, 0, sizeof(_index));
+  if (!_db) _db.reset(new LoDb("lotato", "/__ext__"));
 
   if (!_registered) {
-    _db.registerTable("mesh_nodes", &LotatoMeshNode_msg, sizeof(LotatoMeshNode));
+    _db->registerTable("mesh_nodes", &LotatoMeshNode_msg, sizeof(LotatoMeshNode));
     _registered = true;
   }
   loadIndex();
 }
 
 void LotatoNodeStore::loadIndex() {
-  if (!_registered) return;
+  if (!_registered || !_db) return;
 
-  std::vector<void*> rows = _db.select("mesh_nodes", nullptr, nullptr, 0);
+  std::vector<void*> rows = _db->select("mesh_nodes", nullptr, nullptr, 0);
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  _by_key.clear();
+
   int loaded = 0;
   for (void* p : rows) {
     auto* row = static_cast<LotatoMeshNode*>(p);
     LotatoNodeRecord rec{};
     if (!pbToRecord(*row, rec) || rec.magic != LOTATO_NODE_MAGIC) continue;
-
-    if (_count >= MAX) {
+    if (_by_key.size() >= (size_t)MAX) {
       ::lolog::LoLog::debug("lotato", "node store: LoDB row count exceeds MAX; stopping load");
       break;
     }
-    int slot = findEmptySlot();
-    if (slot < 0) break;
-
-    lodb_uuid_t u = rowUuid(rec.pub_key);
-    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-    memcpy(_index[slot].key, rec.pub_key, 4);
-    _index[slot].uuid          = u;
-    _index[slot].last_advert    = rec.last_advert;
-    _index[slot].last_posted_ms = 0;
-    _count++;
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+    PubKey32 pk = toKey(rec.pub_key);
+    Entry e{};
+    e.uuid          = rowUuid(rec.pub_key);
+    e.last_advert   = rec.last_advert;
+    e.last_posted_ms = 0;
+    _by_key.emplace(pk, e);
     loaded++;
   }
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
   LoDb::freeRecords(rows);
   ::lolog::LoLog::debug("lotato", "node store: loaded %d nodes from LoDB", loaded);
 }
 
-int LotatoNodeStore::findSlot(const uint8_t* pub_key) const {
-  for (int i = 0; i < MAX; i++) {
-    if (_index[i].last_advert != 0 && memcmp(_index[i].key, pub_key, 4) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
+void LotatoNodeStore::evictLRU() {
+  if (!_db) return;
+  PubKey32 victim{};
+  lodb_uuid_t u = 0;
+  bool found = false;
 
-int LotatoNodeStore::findEmptySlot() const {
-  for (int i = 0; i < MAX; i++) {
-    if (_index[i].last_advert == 0) return i;
-  }
-  return -1;
-}
-
-int LotatoNodeStore::evictLRU() {
-  int oldest = -1;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
   uint32_t oldest_advert = UINT32_MAX;
-  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  for (int i = 0; i < MAX; i++) {
-    if (_index[i].last_advert == 0) continue;
-    if (oldest < 0 || _index[i].last_advert < oldest_advert) {
-      oldest_advert = _index[i].last_advert;
-      oldest        = i;
+  for (const auto& kv : _by_key) {
+    if (kv.second.last_advert != 0 && kv.second.last_advert < oldest_advert) {
+      oldest_advert = kv.second.last_advert;
+      victim = kv.first;
+      u      = kv.second.uuid;
+      found  = true;
     }
   }
-  if (oldest < 0) {
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    return 0;
+  if (!found && !_by_key.empty()) {
+    const auto& kv = *_by_key.begin();
+    victim = kv.first;
+    u      = kv.second.uuid;
+    found  = true;
   }
-  lodb_uuid_t u = _index[oldest].uuid;
+  if (found) _by_key.erase(victim);
   if (_idx_mtx) xSemaphoreGive(_idx_mtx);
 
-  LotatoMeshNode row = LotatoMeshNode_init_zero;
-  if (_db.get("mesh_nodes", u, &row) == LODB_OK && row.magic == LOTATO_NODE_MAGIC && row.pub_key.size == 32) {
-    lotato_ingest_ttl_store().clear(row.pub_key.bytes);
-  }
-  (void)_db.deleteRecord("mesh_nodes", u);
-
-  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  _index[oldest].last_advert    = 0;
-  _index[oldest].last_posted_ms = 0;
-  _index[oldest].uuid          = 0;
-  memset(_index[oldest].key, 0, 4);
-  _count--;
-  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-
-  return oldest;
+  if (!found) return;
+  lotato_ingest_ttl_store().clear(victim.b);
+  (void)_db->deleteRecord("mesh_nodes", u);
 }
 
 bool LotatoNodeStore::persistRecord(const LotatoNodeRecord& rec) {
-  if (!_registered) return false;
+  if (!_db || !_registered) return false;
   LotatoMeshNode row = LotatoMeshNode_init_zero;
   if (!recordToPb(rec, &row)) return false;
   lodb_uuid_t u = rowUuid(rec.pub_key);
-  if (_db.update("mesh_nodes", u, &row) == LODB_OK) return true;
-  return _db.insert("mesh_nodes", u, &row) == LODB_OK;
+  if (_db->update("mesh_nodes", u, &row) == LODB_OK) return true;
+  return _db->insert("mesh_nodes", u, &row) == LODB_OK;
 }
 
-int LotatoNodeStore::put(const uint8_t* pub_key, const char* name, uint8_t type, uint32_t last_advert, int32_t lat,
-                         int32_t lon) {
-  if (!pub_key) return -1;
+bool LotatoNodeStore::put(const uint8_t* pub_key, const char* name, uint8_t type, uint32_t last_advert, int32_t lat,
+                          int32_t lon) {
+  if (!pub_key) return false;
+  PubKey32 pk = toKey(pub_key);
 
-  int slot = -1;
-  int slot_mode = 0;  // 0=update, 1=new empty, 2=evict
   if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  slot = findSlot(pub_key);
-  if (slot < 0) {
-    if (_count < MAX) {
-      slot      = findEmptySlot();
-      slot_mode = (slot >= 0) ? 1 : 0;
-    }
-    if (slot < 0) {
-      if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-      slot      = evictLRU();
-      slot_mode = 2;
-      ::lolog::LoLog::debug("lotato", "node store: store full, evicted LRU slot %d", slot);
-    } else {
-      if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    }
-  } else {
+  bool exists = (_by_key.find(pk) != _by_key.end());
+  while (!exists && _by_key.size() >= (size_t)MAX) {
     if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+    evictLRU();
+    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+    exists = (_by_key.find(pk) != _by_key.end());
   }
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
 
   LotatoNodeRecord rec{};
   memcpy(rec.pub_key, pub_key, 32);
@@ -203,245 +175,249 @@ int LotatoNodeStore::put(const uint8_t* pub_key, const char* name, uint8_t type,
   rec.gps_lon     = lon;
   rec.magic       = LOTATO_NODE_MAGIC;
 
-  ::lolog::LoLog::debug("lotato", "node store put: slot=%d mode=%s idx_count=%u last_advert=%lu type=%u heap=%u", slot,
-                        slot_mode == 0 ? "update" : (slot_mode == 1 ? "new" : "evict"), (unsigned)_count,
-                        (unsigned long)last_advert, (unsigned)type, (unsigned)ESP.getFreeHeap());
-
   LotatoNodeRecord existing{};
-  if (readRecord(slot, existing) && memcmp(&existing, &rec, RECORD_SIZE) == 0) {
-    return slot;
-  }
+  if (readRecord(pub_key, existing) && memcmp(&existing, &rec, RECORD_SIZE) == 0) return true;
 
   if (!persistRecord(rec)) {
-    ::lolog::LoLog::debug("lotato", "node store: LoDB persist failed slot=%d", slot);
-    return -1;
+    ::lolog::LoLog::debug("lotato", "node store: LoDB persist failed");
+    return false;
   }
 
   if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  bool is_new = (_index[slot].last_advert == 0);
-  memcpy(_index[slot].key, pub_key, 4);
-  _index[slot].uuid          = rowUuid(pub_key);
-  _index[slot].last_advert    = last_advert;
-  if (is_new) {
-    _count++;
-    _index[slot].last_posted_ms = 0;
+  Entry e{};
+  e.uuid        = rowUuid(pub_key);
+  e.last_advert = last_advert;
+  auto it       = _by_key.find(pk);
+  if (it != _by_key.end()) {
+    e.last_posted_ms = it->second.last_posted_ms;
+    it->second       = e;
+  } else {
+    e.last_posted_ms = 0;
+    _by_key.emplace(pk, e);
   }
   if (_idx_mtx) xSemaphoreGive(_idx_mtx);
 
-  return slot;
+  ::lolog::LoLog::debug("lotato", "node store put: nodes=%u last_advert=%lu type=%u heap=%u", (unsigned)count(),
+                        (unsigned long)last_advert, (unsigned)type, (unsigned)ESP.getFreeHeap());
+  return true;
 }
 
-void LotatoNodeStore::logFlushTargetsDebug() const {
-  if (!::lolog::LoLog::isVerbose()) return;
-  char line[384];
-  size_t pos = 0;
-  int listed = 0;
-  int overflow = 0;
-  constexpr int kMaxList = 32;
-  LotatoNodeRecord rec;
-  line[0] = '\0';
-
-  for (int i = 0; i < MAX; i++) {
-    if (_index[i].last_advert == 0) continue;
-    if (!readRecord(i, rec)) continue;
-    char nid[10];
-    nid[0] = '!';
-    static const char* hx = "0123456789abcdef";
-    for (int b = 0; b < 4; b++) {
-      nid[1 + b * 2]     = hx[rec.pub_key[b] >> 4];
-      nid[1 + b * 2 + 1] = hx[rec.pub_key[b] & 0x0f];
-    }
-    nid[9] = '\0';
-    if (listed >= kMaxList) {
-      overflow++;
-      continue;
-    }
-    int w = snprintf(line + pos, sizeof(line) - pos, "%s%s", pos ? " " : "", nid);
-    if (w < 0 || (size_t)w >= sizeof(line) - pos) break;
-    pos += (size_t)w;
-    listed++;
-  }
-
-  if (line[0]) {
-    ::lolog::LoLog::debug("lotato", "lotato CLI: flush — node ids: %s", line);
-    if (overflow > 0) {
-      ::lolog::LoLog::debug("lotato", "lotato CLI: flush — (%d more ids not listed)", overflow);
-    }
-  }
-}
-
-bool LotatoNodeStore::visibleMeshHeard(int slot) const {
-  if (slot < 0 || slot >= MAX || !_idx_mtx) return false;
+void LotatoNodeStore::forEachPubKey(LotatoPubWalkFn fn, void* user) const {
+  if (!fn || !_idx_mtx) return;
+  std::vector<PubKey32> copy;
   xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  uint32_t la = _index[slot].last_advert;
+  copy.reserve(_by_key.size());
+  for (const auto& kv : _by_key) copy.push_back(kv.first);
   xSemaphoreGive(_idx_mtx);
-  if (la == 0) return false;
+  for (const auto& k : copy) fn(k.b, user);
+}
+
+bool LotatoNodeStore::visibleMeshHeard(const uint8_t pub_key[32]) const {
   time_t now = time(nullptr);
   if (now < (time_t)1700000000) return true;
-  uint32_t vis = LotatoConfig::instance().ingestVisibilitySecs();
-  return (uint64_t)now - (uint64_t)la <= (uint64_t)vis;
+
+  PubKey32 pk = toKey(pub_key);
+  uint32_t last_advert = 0;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  auto it = _by_key.find(pk);
+  if (it != _by_key.end()) last_advert = it->second.last_advert;
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+  if (last_advert == 0) return false;
+
+  const uint32_t now_u = (uint32_t)now;
+  const uint32_t vis   = LotatoConfig::instance().ingestVisibilitySecs();
+  if (now_u >= last_advert) return (now_u - last_advert) <= vis;
+  return true;
 }
 
-bool LotatoNodeStore::dueForIngest(int slot, uint32_t now_ms) const {
-  if (slot < 0 || slot >= MAX || !_idx_mtx) return false;
-  xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  uint32_t la    = _index[slot].last_advert;
-  uint32_t lp_ms = _index[slot].last_posted_ms;
-  xSemaphoreGive(_idx_mtx);
-  if (la == 0) return false;
-  if (lp_ms == 0) return true;
-  uint32_t ref_ms = LotatoConfig::instance().ingestRefreshSecs() * 1000u;
-  return (uint32_t)(now_ms - lp_ms) >= ref_ms;
+bool LotatoNodeStore::dueForIngest(const uint8_t pub_key[32], uint32_t now_ms) const {
+  if (!visibleMeshHeard(pub_key)) return false;
+
+  PubKey32 pk = toKey(pub_key);
+  uint32_t last_posted_ms = 0;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  auto it = _by_key.find(pk);
+  if (it == _by_key.end()) {
+    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+    return false;
+  }
+  last_posted_ms = it->second.last_posted_ms;
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+
+  const uint32_t refresh_ms = LotatoConfig::instance().ingestRefreshSecs() * 1000u;
+  if (last_posted_ms == 0) return true;
+  return (uint32_t)(now_ms - last_posted_ms) >= refresh_ms;
 }
 
-void LotatoNodeStore::markPosted(int slot, uint32_t now_ms) {
-  if (slot < 0 || slot >= MAX) return;
-  LotatoNodeRecord rec{};
-  if (!readRecord(slot, rec)) return;
-  time_t now_wall = time(nullptr);
-  if (now_wall >= (time_t)1700000000) {
-    lotato_ingest_ttl_store().setLastPostedUnix(rec.pub_key, (uint32_t)now_wall);
+void LotatoNodeStore::markPosted(const uint8_t pub_key[32], uint32_t now_ms) {
+  PubKey32 pk = toKey(pub_key);
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  auto it = _by_key.find(pk);
+  if (it != _by_key.end()) it->second.last_posted_ms = now_ms;
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+
+  time_t t = time(nullptr);
+  if (t > (time_t)1700000000) lotato_ingest_ttl_store().setLastPostedUnix(pub_key, (uint32_t)t);
+}
+
+bool LotatoNodeStore::readRecord(const uint8_t pub_key[32], LotatoNodeRecord& out) const {
+  PubKey32 pk = toKey(pub_key);
+  lodb_uuid_t u = 0;
+  bool in_index = false;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  auto it = _by_key.find(pk);
+  if (it != _by_key.end()) {
+    u        = it->second.uuid;
+    in_index = true;
   }
-  if (!_idx_mtx) return;
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+  if (!in_index || !_db) return false;
+
+  LotatoMeshNode row = LotatoMeshNode_init_zero;
+  if (_db->get("mesh_nodes", u, &row) != LODB_OK) return false;
+  return pbToRecord(row, out) && out.magic == LOTATO_NODE_MAGIC;
+}
+
+int LotatoNodeStore::count() const {
+  if (!_idx_mtx) return 0;
   xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  if (_index[slot].last_advert != 0) {
-    _index[slot].last_posted_ms = now_ms == 0 ? 1u : now_ms;
-  }
+  int n = (int)_by_key.size();
   xSemaphoreGive(_idx_mtx);
+  return n;
 }
 
 void LotatoNodeStore::flushAllTtl() {
-  for (int s = 0; s < MAX; s++) {
-    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-    bool occupied = _index[s].last_advert != 0;
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    if (!occupied) continue;
-    LotatoNodeRecord r{};
-    if (!readRecord(s, r)) continue;
-    lotato_ingest_ttl_store().clear(r.pub_key);
-    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-    if (_index[s].last_advert != 0) _index[s].last_posted_ms = 0;
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+  std::vector<PubKey32> keys;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  keys.reserve(_by_key.size());
+  for (auto& kv : _by_key) {
+    kv.second.last_posted_ms = 0;
+    keys.push_back(kv.first);
   }
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+  for (const auto& k : keys) lotato_ingest_ttl_store().clear(k.b);
 }
 
 void LotatoNodeStore::gcSweepStale() {
   time_t now = time(nullptr);
   if (now < (time_t)1700000000) return;
-  uint32_t gc = LotatoConfig::instance().ingestGcStaleSecs();
-  int victims[64];
-  int nv = 0;
-  for (int s = 0; s < MAX && nv < 64; s++) {
-    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-    uint32_t la = _index[s].last_advert;
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    if (la == 0) continue;
-    if ((uint64_t)now > (uint64_t)la + (uint64_t)gc) victims[nv++] = s;
-  }
-  for (int i = 0; i < nv; i++) {
-    (void)removeSlot(victims[i]);
-  }
-}
 
-bool LotatoNodeStore::removeSlot(int slot) {
-  if (slot < 0 || slot >= MAX) return false;
-
-  LotatoNodeRecord old{};
-  if (!readRecord(slot, old) || old.magic != LOTATO_NODE_MAGIC) return false;
-
-  lodb_uuid_t u = 0;
+  const uint32_t stale = LotatoConfig::instance().ingestGcStaleSecs();
+  const uint32_t now_u = (uint32_t)now;
+  std::vector<PubKey32> victims;
   if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  if (_index[slot].last_advert == 0) {
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    return true;
+  for (const auto& kv : _by_key) {
+    uint32_t la = kv.second.last_advert;
+    if (la == 0) continue;
+    if (now_u >= la && now_u - la >= stale) victims.push_back(kv.first);
   }
-  u = _index[slot].uuid;
-  memset(_index[slot].key, 0, 4);
-  _index[slot].last_advert     = 0;
-  _index[slot].last_posted_ms  = 0;
-  _index[slot].uuid           = 0;
-  _count--;
   if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-
-  lotato_ingest_ttl_store().clear(old.pub_key);
-  (void)_db.deleteRecord("mesh_nodes", u);
-  return true;
+  for (const auto& k : victims) (void)remove(k.b);
 }
 
-void LotatoNodeStore::dumpAllNodesDebug() const {
-  if (!::lolog::LoLog::isVerbose()) return;
-  time_t now_wall = time(nullptr);
-  bool wall_ok = now_wall >= (time_t)1700000000;
-  uint32_t now_ms = millis();
-  uint32_t ref_ms = LotatoConfig::instance().ingestRefreshSecs() * 1000u;
-  ::lolog::LoLog::debug("lotato",
-                        "contacts dump: count=%d now_wall=%lu now_ms=%lu ref_ms=%lu", _count,
-                        (unsigned long)(wall_ok ? (uint32_t)now_wall : 0u), (unsigned long)now_ms,
-                        (unsigned long)ref_ms);
-  int printed = 0;
-  for (int s = 0; s < MAX; s++) {
-    if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-    uint32_t la    = _index[s].last_advert;
-    uint32_t lp_ms = _index[s].last_posted_ms;
-    if (_idx_mtx) xSemaphoreGive(_idx_mtx);
-    if (la == 0) continue;
-    LotatoNodeRecord rec{};
-    if (!readRecord(s, rec)) continue;
-    char nid[10];
-    nid[0] = '!';
-    static const char* hx = "0123456789abcdef";
-    for (int b = 0; b < 4; b++) {
-      nid[1 + b * 2]     = hx[rec.pub_key[b] >> 4];
-      nid[1 + b * 2 + 1] = hx[rec.pub_key[b] & 0x0f];
-    }
-    nid[9] = '\0';
-    uint32_t advert_age = wall_ok && (uint64_t)now_wall > (uint64_t)la ? (uint32_t)((uint64_t)now_wall - (uint64_t)la) : 0u;
-    uint32_t since_post_ms = (lp_ms == 0) ? 0u : (uint32_t)(now_ms - lp_ms);
-    bool due = (lp_ms == 0) || (ref_ms > 0 && since_post_ms >= ref_ms);
-    double lat = (double)rec.gps_lat / 1000000.0;
-    double lon = (double)rec.gps_lon / 1000000.0;
-    ::lolog::LoLog::debug(
-        "lotato",
-        "  slot=%d %s type=%u name=\"%.32s\" last_advert=%lu age=%lus lp_ms=%lu since_post=%lums due=%d gps=%.6f,%.6f",
-        s, nid, (unsigned)rec.type, rec.name, (unsigned long)la, (unsigned long)advert_age, (unsigned long)lp_ms,
-        (unsigned long)since_post_ms, due ? 1 : 0, lat, lon);
-    printed++;
+bool LotatoNodeStore::remove(const uint8_t pub_key[32]) {
+  PubKey32 pk = toKey(pub_key);
+  lodb_uuid_t u = 0;
+  bool had = false;
+  if (_idx_mtx) xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  auto it = _by_key.find(pk);
+  if (it != _by_key.end()) {
+    u   = it->second.uuid;
+    had = true;
+    _by_key.erase(it);
   }
-  ::lolog::LoLog::debug("lotato", "contacts dump: printed=%d slots", printed);
+  if (_idx_mtx) xSemaphoreGive(_idx_mtx);
+  if (!had || !_db) return false;
+  lotato_ingest_ttl_store().clear(pub_key);
+  return _db->deleteRecord("mesh_nodes", u) == LODB_OK;
 }
 
 int LotatoNodeStore::countVisibleNodes() const {
+  std::vector<PubKey32> copy;
+  if (!_idx_mtx) return 0;
+  xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  copy.reserve(_by_key.size());
+  for (const auto& kv : _by_key) copy.push_back(kv.first);
+  xSemaphoreGive(_idx_mtx);
   int n = 0;
-  for (int s = 0; s < MAX; s++) {
-    if (visibleMeshHeard(s)) n++;
+  for (const auto& k : copy) {
+    if (visibleMeshHeard(k.b)) n++;
   }
   return n;
 }
 
 int LotatoNodeStore::countDueNodes() const {
+  const uint32_t now_ms = millis();
+  std::vector<PubKey32> copy;
+  if (!_idx_mtx) return 0;
+  xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  copy.reserve(_by_key.size());
+  for (const auto& kv : _by_key) copy.push_back(kv.first);
+  xSemaphoreGive(_idx_mtx);
   int n = 0;
-  uint32_t now_ms = millis();
-  for (int s = 0; s < MAX; s++) {
-    if (dueForIngest(s, now_ms)) n++;
+  for (const auto& k : copy) {
+    if (dueForIngest(k.b, now_ms)) n++;
   }
   return n;
 }
 
-bool LotatoNodeStore::readRecord(int slot, LotatoNodeRecord& out) const {
-  if (slot < 0 || slot >= MAX || !_registered || !_idx_mtx) return false;
-
+void LotatoNodeStore::logFlushTargetsDebug() const {
+  if (!::lolog::LoLog::isVerbose()) return;
+  std::vector<PubKey32> copy;
+  if (!_idx_mtx) return;
   xSemaphoreTake(_idx_mtx, portMAX_DELAY);
-  if (_index[slot].last_advert == 0) {
-    xSemaphoreGive(_idx_mtx);
-    return false;
-  }
-  lodb_uuid_t u = _index[slot].uuid;
+  copy.reserve(_by_key.size());
+  for (const auto& kv : _by_key) copy.push_back(kv.first);
   xSemaphoreGive(_idx_mtx);
 
-  LotatoMeshNode row = LotatoMeshNode_init_zero;
-  if (_db.get("mesh_nodes", u, &row) != LODB_OK) return false;
-  if (!pbToRecord(row, out)) return false;
-  return out.magic == LOTATO_NODE_MAGIC;
+  char line[384];
+  line[0] = '\0';
+  constexpr int kMaxList = 32;
+  int listed = 0;
+  static const char* hx = "0123456789abcdef";
+  for (const auto& k : copy) {
+    if (listed >= kMaxList) break;
+    char nid[10];
+    nid[0] = '!';
+    for (int b = 0; b < 4; b++) {
+      nid[1 + b * 2]     = hx[k.b[b] >> 4];
+      nid[1 + b * 2 + 1] = hx[k.b[b] & 0x0f];
+    }
+    nid[9] = '\0';
+    size_t p = strlen(line);
+    if (p + 1 + 9 < sizeof(line)) {
+      snprintf(line + p, sizeof(line) - p, "%s%s", p ? " " : "", nid);
+      listed++;
+    }
+  }
+  if (line[0]) {
+    int extra = (int)copy.size() - listed;
+    if (extra > 0) {
+      ::lolog::LoLog::debug("lotato", "flush TTL targets (%d more): %s", extra, line);
+    } else {
+      ::lolog::LoLog::debug("lotato", "flush TTL targets: %s", line);
+    }
+  }
+}
+
+void LotatoNodeStore::dumpAllNodesDebug() const {
+  if (!::lolog::LoLog::isVerbose()) return;
+  std::vector<PubKey32> copy;
+  if (!_idx_mtx) return;
+  xSemaphoreTake(_idx_mtx, portMAX_DELAY);
+  copy.reserve(_by_key.size());
+  for (const auto& kv : _by_key) copy.push_back(kv.first);
+  xSemaphoreGive(_idx_mtx);
+
+  for (const auto& k : copy) {
+    LotatoNodeRecord rec{};
+    if (!readRecord(k.b, rec)) continue;
+    char pkhex[65];
+    pubKeyToUuidInput(k.b, pkhex);
+    ::lolog::LoLog::debug("lotato", "node %.16s… name=\"%.32s\" type=%u last_advert=%lu lat=%ld lon=%ld", pkhex,
+                          rec.name, (unsigned)rec.type, (unsigned long)rec.last_advert, (long)rec.gps_lat,
+                          (long)rec.gps_lon);
+  }
 }
 
 #endif // ESP32
