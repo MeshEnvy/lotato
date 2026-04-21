@@ -22,7 +22,7 @@
 struct LotatoNodeRecord {
   uint8_t pub_key[32]; // full 32-byte public key
   char    name[32];    // advertised name (null-terminated)
-  uint8_t type;        // ADV_TYPE_* from AdvertDataHelpers.h
+  uint8_t type;        // firmware advert type (see lotato/platforms/*/ ingest delegate)
   uint8_t _pad[3];
   uint32_t last_advert; // Unix timestamp from advert packet
   int32_t  gps_lat;     // latitude  × 1e6 (0 if none)
