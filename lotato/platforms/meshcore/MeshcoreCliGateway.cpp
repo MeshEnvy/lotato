@@ -21,10 +21,10 @@
 #include <LotatoConfig.h>
 #include <LotatoIngestor.h>
 #include <lofi/Lofi.h>
-#include <lofs/LoFS.h>
 #include <lolog/LoLog.h>
 #include <lomessage/Buffer.h>
 #include <lomessage/Split.h>
+#include <lostar/LoStar.h>
 #include <losettings/ConfigHub.h>
 
 namespace lotato {
@@ -335,10 +335,7 @@ void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], 
   // Stage 1 — platform bringup. VFS logs [E] for every fopen of a missing file; LoDB/LoSettings
   // treat "missing" as normal (get returns NOT_FOUND), so silence the noise — real errors still log.
   esp_log_level_set("vfs_api", ESP_LOG_NONE);
-  LoFS::bindInternalFs(internal_fs);
-  LoFS::mountDefaults();
-  ::lolog::LoLog::registerConfigSchema();
-  ::lolog::LoLog::loadFromSettings();
+  LoStar::boot({{"/__int__", internal_fs}});
 
   // Stage 2 — Lotato stack.
   LotatoConfig::instance().load();
