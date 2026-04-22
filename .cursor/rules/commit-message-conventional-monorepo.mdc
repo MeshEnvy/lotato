@@ -1,0 +1,29 @@
+---
+description: Conventional Commit format for monorepo changes
+alwaysApply: true
+---
+
+# Commit Message Format
+
+Use Conventional Commits with explicit monorepo scope:
+
+`type(scope): summary`
+
+- `type` must be one of: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`, `revert`
+- `scope` should identify the touched package/app/domain (for example: `lo-star`, `lotato`, `meshcore`, `meshtastic`, `potato-mesh`, `repo`)
+- `summary` should be imperative, lower-case, and concise
+- the full subject line (`type(scope): summary`) must be at most 50 characters
+
+## Monorepo Scope Rules
+
+- Single package change: use one concrete scope, e.g. `fix(lo-star): ...`
+- Cross-package change: use a shared domain scope, e.g. `feat(mesh): ...` or `chore(repo): ...`
+- Avoid empty scope unless the change truly spans the whole repo
+
+## Examples
+
+- `feat(lotato): add ingest retry backoff`
+- `fix(lo-star): make lofs rename safe on spiffs`
+- `refactor(meshcore): simplify wifi cli handlers`
+- `chore(repo): align platformio flags across variants`
+
