@@ -42,7 +42,7 @@ public:
 
   /**
    * Conditionally handle an admin TXT_MSG CLI command — only if @p command is a Lotato root
-   * (`lotato …` / `wifi …` / `config …`). On hit: busy gate, route snapshot (with the client's
+   * (`lotato …` / `wifi …` / `config …`, including `lotato endpoint` / `lotato auth`). On hit: busy gate, route snapshot (with the client's
    *  pub_key + shared_secret so async / chunked replies can re-encrypt later), dispatch, reply
    *  enqueue; returns true (host skips the upstream reply path). On miss: no side effects;
    *  returns false so the host's upstream reply path runs unchanged, tracking upstream drift-free.

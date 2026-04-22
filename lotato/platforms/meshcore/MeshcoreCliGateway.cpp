@@ -112,6 +112,58 @@ void h_resume(locommand::Context& ctx) {
   ctx.out.append("OK - ingest resumed");
 }
 
+/** Join argv tokens into @p valbuf (same pattern as `config set` values). */
+static bool join_argv_value(locommand::Context& ctx, char* valbuf, size_t val_cap) {
+  valbuf[0] = '\0';
+  size_t pos = 0;
+  for (int i = 0; i < ctx.argc && pos + 1 < val_cap; i++) {
+    if (i > 0 && pos + 1 < val_cap) valbuf[pos++] = ' ';
+    const char* p = ctx.argv[i];
+    size_t l = strlen(p);
+    if (pos + l >= val_cap) return false;
+    memcpy(valbuf + pos, p, l);
+    pos += l;
+    valbuf[pos] = '\0';
+  }
+  return true;
+}
+
+void h_endpoint(locommand::Context& ctx) {
+  if (ctx.argc < 1) {
+    ctx.printHelp();
+    return;
+  }
+  static char valbuf[320];
+  if (!join_argv_value(ctx, valbuf, sizeof(valbuf))) {
+    ctx.out.append("Err - value too long\n");
+    return;
+  }
+  char err[128];
+  if (!losettings::ConfigHub::instance().setFromString("lotato.ingest.url", valbuf, err, sizeof(err))) {
+    ctx.out.appendf("Err - %s\n", err);
+    return;
+  }
+  ctx.out.append("OK\n");
+}
+
+void h_auth(locommand::Context& ctx) {
+  if (ctx.argc < 1) {
+    ctx.printHelp();
+    return;
+  }
+  static char valbuf[320];
+  if (!join_argv_value(ctx, valbuf, sizeof(valbuf))) {
+    ctx.out.append("Err - value too long\n");
+    return;
+  }
+  char err[128];
+  if (!losettings::ConfigHub::instance().setFromString("lotato.ingest.token", valbuf, err, sizeof(err))) {
+    ctx.out.appendf("Err - %s\n", err);
+    return;
+  }
+  ctx.out.append("OK\n");
+}
+
 void h_ingest(locommand::Context& ctx) {
   size_t limit = 0;
   if (ctx.argc >= 1) {
@@ -233,6 +285,14 @@ const locommand::ArgSpec k_ingest_args[] = {
     {"n", "uint", nullptr, false, "Max entries to show (default: all)"},
 };
 
+const locommand::ArgSpec k_lotato_endpoint_args[] = {
+    {"url", "string", nullptr, true, "Ingest origin URL (same as config set lotato.ingest.url)"},
+};
+
+const locommand::ArgSpec k_lotato_auth_args[] = {
+    {"token", "secret", nullptr, true, "API bearer token (same as config set lotato.ingest.token)"},
+};
+
 }  // namespace
 
 /* ── CliGateway ─────────────────────────────────────────────────────── */
@@ -250,7 +310,11 @@ void CliGateway::registerLotatoEngine() {
   _eng_lotato.add("resume", &h_resume, nullptr, nullptr, "resume ingest (shortcut for config)");
   _eng_lotato.addWithArgs("ingest", &h_ingest, k_ingest_args, 1, nullptr,
                            "recent ingest POSTs (newest first)");
-  _eng_lotato.setRootBrief("ingest status / history");
+  _eng_lotato.addWithArgs("endpoint", &h_endpoint, k_lotato_endpoint_args, 1, nullptr,
+                          "set ingest URL (alias: lotato.ingest.url)");
+  _eng_lotato.addWithArgs("auth", &h_auth, k_lotato_auth_args, 1, nullptr,
+                          "set API token (alias: lotato.ingest.token)");
+  _eng_lotato.setRootBrief("ingest status / history / endpoint / auth");
 }
 
 void CliGateway::registerWifiEngine() {
