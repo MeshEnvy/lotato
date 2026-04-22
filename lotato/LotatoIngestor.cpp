@@ -4,8 +4,8 @@
 
 #include <LotatoIngestPlatform.h>
 #include <LotatoConfig.h>
+#include <LotatoIngestHistory.h>
 #include <lolog/LoLog.h>
-#include <LotatoNodeStore.h>
 #include <lofi/Lofi.h>
 #include <losettings/LoSettings.h>
 #include <WiFi.h>
@@ -42,6 +42,10 @@
 /** Max node entries merged into one POST (also limited by body cap). */
 #ifndef LOTATO_INGEST_BATCH_MAX_SLOTS
 #define LOTATO_INGEST_BATCH_MAX_SLOTS 48
+#endif
+/** Worker wake cadence so the ingestor heartbeat still fires on a silent mesh. */
+#ifndef LOTATO_INGEST_WORKER_WAKE_MS
+#define LOTATO_INGEST_WORKER_WAKE_MS 60000
 #endif
 #ifndef LOTATO_WIFI_DOWN_LOG_INTERVAL_MS
 #define LOTATO_WIFI_DOWN_LOG_INTERVAL_MS 8000
@@ -148,13 +152,16 @@ uint16_t g_batch_len = 0;
 uint8_t g_batch_n = 0;
 uint8_t g_batch_keys[kBatchMaxSlots][32]{};
 char g_batch_node_ids[kBatchMaxSlots][12]{};
-LotatoNodeStore* g_batch_store = nullptr;
-uint8_t g_batch_self_pk[lotato::ingest_platform::kPublicKeyBytes]{};
+LotatoNodeRecord g_batch_records[kBatchMaxSlots]{};
+LotatoIngestHistory* g_batch_hist = nullptr;
 uint32_t g_batch_next_retry_ms = 0;
 uint32_t g_batch_fail_backoff_ms = 0;
 
-/** Scratch for try_build_batch_from_store — must not live on loopTask stack (~12KB would overflow). */
-static char g_build_merged[kBodyCap];
+/** Set once the gateway hands over the node's own pub_key. Used by the heartbeat path even on a silent mesh. */
+uint8_t g_self_pk[lotato::ingest_platform::kPublicKeyBytes]{};
+bool    g_self_pk_set = false;
+
+/** Scratch buffers for body rebuild — sized with kBodyCap so `build_record_ingest_json` has room. */
 static char g_build_frag[kBodyCap];
 static char g_build_merge_tmp[kBodyCap];
 
@@ -186,7 +193,7 @@ void lotato_ingest_clear_queue() {
   if (!g_q_mtx) {
     g_batch_len = 0;
     g_batch_n = 0;
-    g_batch_store = nullptr;
+    g_batch_hist = nullptr;
     g_batch_next_retry_ms = g_batch_fail_backoff_ms = 0;
     ::lolog::LoLog::debug("lotato", "ingest batch cleared");
     return;
@@ -194,7 +201,7 @@ void lotato_ingest_clear_queue() {
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
   g_batch_len = 0;
   g_batch_n = 0;
-  g_batch_store = nullptr;
+  g_batch_hist = nullptr;
   g_batch_next_retry_ms = g_batch_fail_backoff_ms = 0;
   xSemaphoreGive(g_q_mtx);
   ::lolog::LoLog::debug("lotato", "ingest batch cleared");
@@ -244,8 +251,6 @@ static void format_ingest_post_label(char* out, size_t cap, const char (*ids)[12
     pos += (size_t)w;
   }
 }
-
-// --- JSON build (used by batch builder; defined before ingest_try_step) ---
 
 static void bin_to_hex_lower_pre(const uint8_t* b, size_t n, char* out) {
   static const char* hexd = "0123456789abcdef";
@@ -298,8 +303,10 @@ static bool build_ingestor_heartbeat_body(const uint8_t self_pub[lotato::ingest_
 }
 
 /** Before node batches, register like Python ``queue_ingestor_heartbeat`` (meshcore ``_process_self_info``). */
-static void maybe_post_ingestor_heartbeat(const uint8_t self_pub[lotato::ingest_platform::kPublicKeyBytes]) {
-  if (!self_pub_key_nonzero(self_pub)) return;
+static void maybe_post_ingestor_heartbeat() {
+  if (!g_self_pk_set || !self_pub_key_nonzero(g_self_pk)) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!LotatoConfig::instance().isIngestReady()) return;
   uint32_t now_ms = millis();
   if (g_ingestor_heartbeat_ok_ms != 0) {
     uint32_t elapsed = now_ms - g_ingestor_heartbeat_ok_ms;
@@ -308,7 +315,7 @@ static void maybe_post_ingestor_heartbeat(const uint8_t self_pub[lotato::ingest_
 
   char body[320];
   uint16_t blen = 0;
-  if (!build_ingestor_heartbeat_body(self_pub, body, sizeof(body), &blen)) {
+  if (!build_ingestor_heartbeat_body(g_self_pk, body, sizeof(body), &blen)) {
     ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor heartbeat JSON build failed");
     return;
   }
@@ -320,7 +327,7 @@ static void maybe_post_ingestor_heartbeat(const uint8_t self_pub[lotato::ingest_
     ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor registered (%s)",
                           lotato::ingest_platform::protocol_name());
   } else {
-    ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor POST failed (nodes will retry; protocol may default)");
+    ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor POST failed (will retry on next wake)");
   }
 }
 
@@ -416,80 +423,46 @@ static bool build_record_ingest_json(const uint8_t self_pub_key[lotato::ingest_p
   return true;
 }
 
-struct BatchBuildCtx {
-  LotatoNodeStore* store;
-  const uint8_t*   self_pk;
-  uint32_t         now_ms;
-  uint16_t         merged_len;
-  uint8_t          n;
-  char             batch_ids[kBatchMaxSlots][12];
-  uint8_t          batch_keys[kBatchMaxSlots][32];
-};
-
-static void batch_build_visit(const uint8_t pub_key[32], void* user) {
-  auto* ctx = static_cast<BatchBuildCtx*>(user);
-  if (ctx->n >= kBatchMaxSlots) return;
-  if (!ctx->store->dueForIngest(pub_key, ctx->now_ms)) return;
-  LotatoNodeRecord rec{};
-  if (!ctx->store->readRecord(pub_key, rec)) return;
-
-  char nid[12];
+/** Regenerate g_batch_body from g_batch_records[0..g_batch_n]. Caller holds g_q_mtx. Returns false on overflow. */
+static bool rebuild_batch_body_locked() {
+  if (g_batch_n == 0) {
+    g_batch_body[0] = '\0';
+    g_batch_len = 0;
+    return true;
+  }
   uint16_t flen = 0;
-  if (!build_record_ingest_json(ctx->self_pk, rec, g_build_frag, sizeof(g_build_frag), &flen, nid)) return;
-
-  if (ctx->n == 0) {
-    memcpy(g_build_merged, g_build_frag, flen + 1);
-    ctx->merged_len = flen;
-    memcpy(ctx->batch_ids[0], nid, 12);
-    memcpy(ctx->batch_keys[0], pub_key, 32);
-    ctx->n = 1;
-    return;
+  char nid[12];
+  if (!build_record_ingest_json(g_self_pk, g_batch_records[0], g_build_frag, sizeof(g_build_frag), &flen, nid)) {
+    return false;
   }
-  uint16_t new_len = 0;
-  if (!merge_ingest_bodies(g_build_merged, g_build_frag, flen, g_build_merge_tmp, sizeof(g_build_merge_tmp), &new_len))
-    return;
-  memcpy(g_build_merged, g_build_merge_tmp, new_len + 1);
-  ctx->merged_len = new_len;
-  memcpy(ctx->batch_ids[ctx->n], nid, 12);
-  memcpy(ctx->batch_keys[ctx->n], pub_key, 32);
-  ctx->n++;
-}
-
-/** Fill g_batch_* from store (caller holds g_q_mtx). */
-static void try_build_batch_from_store(LotatoNodeStore& store,
-                                       const uint8_t self_pk[lotato::ingest_platform::kPublicKeyBytes]) {
-  if (g_batch_len > 0) return;
-
-  BatchBuildCtx ctx{};
-  ctx.store   = &store;
-  ctx.self_pk = self_pk;
-  ctx.now_ms  = millis();
-  store.forEachPubKey(batch_build_visit, &ctx);
-
-  if (ctx.n == 0) return;
-
-  memcpy(g_batch_body, g_build_merged, ctx.merged_len + 1);
-  g_batch_len = ctx.merged_len;
-  g_batch_n = ctx.n;
-  memcpy(g_batch_keys, ctx.batch_keys, ctx.n * sizeof(g_batch_keys[0]));
-  for (uint8_t i = 0; i < ctx.n; i++) memcpy(g_batch_node_ids[i], ctx.batch_ids[i], 12);
-  memcpy(g_batch_self_pk, self_pk, lotato::ingest_platform::kPublicKeyBytes);
-  g_batch_store = &store;
-  if (::lolog::LoLog::isVerbose()) {
-    ::lolog::LoLog::debug("lotato", "lotato ingest: built batch %u nodes %u bytes", (unsigned)ctx.n,
-                          (unsigned)ctx.merged_len);
+  if (flen + 1 > kBodyCap) return false;
+  memcpy(g_batch_body, g_build_frag, flen + 1);
+  g_batch_len = flen;
+  for (uint8_t i = 1; i < g_batch_n; i++) {
+    uint16_t fl = 0;
+    if (!build_record_ingest_json(g_self_pk, g_batch_records[i], g_build_frag, sizeof(g_build_frag), &fl, nid)) {
+      return false;
+    }
+    uint16_t merged_len = 0;
+    if (!merge_ingest_bodies(g_batch_body, g_build_frag, fl, g_build_merge_tmp, sizeof(g_build_merge_tmp),
+                             &merged_len)) {
+      return false;
+    }
+    memcpy(g_batch_body, g_build_merge_tmp, merged_len + 1);
+    g_batch_len = merged_len;
   }
+  return true;
 }
 
 bool ingest_try_step() {
   static char local_body[kBodyCap];
   static uint8_t local_keys[kBatchMaxSlots][32];
+  static LotatoNodeRecord local_records[kBatchMaxSlots];
   uint16_t local_len = 0;
   uint8_t local_n = 0;
-  LotatoNodeStore* local_store = nullptr;
+  LotatoIngestHistory* local_hist = nullptr;
   char post_label[96];
   char batch_ids[kBatchMaxSlots][12];
-  uint8_t local_self_pk[lotato::ingest_platform::kPublicKeyBytes]{};
 
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
   if (ingest_paused() || !LotatoConfig::instance().isIngestReady() || g_batch_len == 0) {
@@ -521,28 +494,27 @@ bool ingest_try_step() {
   memcpy(local_body, g_batch_body, local_len + 1);
   local_n = g_batch_n;
   memcpy(local_keys, g_batch_keys, local_n * sizeof(local_keys[0]));
-  local_store = g_batch_store;
+  memcpy(local_records, g_batch_records, local_n * sizeof(local_records[0]));
+  local_hist = g_batch_hist;
   for (uint8_t i = 0; i < local_n; i++) memcpy(batch_ids[i], g_batch_node_ids[i], 12);
-  memcpy(local_self_pk, g_batch_self_pk, lotato::ingest_platform::kPublicKeyBytes);
 
   format_ingest_post_label(post_label, sizeof(post_label), batch_ids, local_n);
   xSemaphoreGive(g_q_mtx);
 
-  maybe_post_ingestor_heartbeat(local_self_pk);
   bool ok = lotato_post(LOTATO_INGEST_API_PATH, post_label, local_body, local_len);
 
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
-  if (ok && g_batch_len == local_len && g_batch_n == local_n && g_batch_store == local_store &&
+  if (ok && g_batch_len == local_len && g_batch_n == local_n && g_batch_hist == local_hist &&
       memcmp(g_batch_body, local_body, local_len) == 0) {
     uint32_t posted_ms = millis();
-    if (local_store) {
+    if (local_hist) {
       for (uint8_t i = 0; i < local_n; i++) {
-        local_store->markPosted(local_keys[i], posted_ms);
+        local_hist->recordPosted(local_records[i], posted_ms);
       }
     }
     g_batch_len = 0;
     g_batch_n = 0;
-    g_batch_store = nullptr;
+    g_batch_hist = nullptr;
     g_batch_next_retry_ms = 0;
     g_batch_fail_backoff_ms = (uint32_t)LOTATO_HTTP_RETRY_DELAY_MS;
   } else if (!ok) {
@@ -562,7 +534,8 @@ bool ingest_try_step() {
 
 void ingest_worker_entry(void*) {
   for (;;) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOTATO_INGEST_WORKER_WAKE_MS));
+    maybe_post_ingestor_heartbeat();
     while (ingest_try_step()) {}
   }
 }
@@ -602,26 +575,66 @@ uint8_t LotatoIngestor::pendingQueueDepth() const { return lotato_ingest_queue_d
 
 void LotatoIngestor::restartAfterConfigChange() { lotato_ingest_clear_queue(); }
 
-void LotatoIngestor::service(LotatoNodeStore* node_store, const uint8_t* self_pub_key) {
+void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& hist,
+                              const uint8_t self_pub_key[32]) {
   if (ingest_paused() || !LotatoConfig::instance().isIngestReady()) return;
-  ensure_worker();
-  if (!g_q_mtx || !g_worker) return;
-
-  static uint32_t s_last_gc_ms = 0;
-  uint32_t tms = millis();
-  if (node_store && (tms - s_last_gc_ms >= 60000u || s_last_gc_ms == 0)) {
-    s_last_gc_ms = tms;
-    node_store->gcSweepStale();
+  if (self_pub_key && !g_self_pk_set) {
+    memcpy(g_self_pk, self_pub_key, lotato::ingest_platform::kPublicKeyBytes);
+    g_self_pk_set = true;
   }
+  if (!g_self_pk_set) return;
+
+  if (!hist.throttleDue(rec.pub_key, millis())) return;
+
+  ensure_worker();
+  if (!g_q_mtx) return;
 
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
-  if (node_store && self_pub_key && g_batch_len == 0) {
-    try_build_batch_from_store(*node_store, self_pub_key);
+  g_batch_hist = &hist;
+
+  int slot = -1;
+  for (uint8_t i = 0; i < g_batch_n; i++) {
+    if (memcmp(g_batch_keys[i], rec.pub_key, 32) == 0) {
+      slot = (int)i;
+      break;
+    }
   }
-  bool pending = g_batch_len > 0;
+
+  if (slot >= 0) {
+    LotatoNodeRecord saved = g_batch_records[slot];
+    g_batch_records[slot] = rec;
+    if (!rebuild_batch_body_locked()) {
+      g_batch_records[slot] = saved;
+      (void)rebuild_batch_body_locked();
+    }
+  } else {
+    if (g_batch_n >= kBatchMaxSlots) {
+      xSemaphoreGive(g_q_mtx);
+      ::lolog::LoLog::debug("lotato", "ingest: batch full (%u), dropping advert", (unsigned)g_batch_n);
+      return;
+    }
+    memcpy(g_batch_keys[g_batch_n], rec.pub_key, 32);
+    format_node_id_pre(g_batch_node_ids[g_batch_n], rec.pub_key);
+    g_batch_records[g_batch_n] = rec;
+    g_batch_n++;
+    if (!rebuild_batch_body_locked()) {
+      g_batch_n--;
+      (void)rebuild_batch_body_locked();
+    }
+  }
+  bool have_work = g_batch_len > 0;
   xSemaphoreGive(g_q_mtx);
 
-  if (pending && WiFi.status() == WL_CONNECTED) notify_worker();
+  if (have_work && WiFi.status() == WL_CONNECTED) notify_worker();
+}
+
+void LotatoIngestor::serviceTick(const uint8_t self_pub_key[32]) {
+  if (self_pub_key && !g_self_pk_set) {
+    memcpy(g_self_pk, self_pub_key, lotato::ingest_platform::kPublicKeyBytes);
+    g_self_pk_set = true;
+  }
+  if (ingest_paused() || !LotatoConfig::instance().isIngestReady()) return;
+  ensure_worker();
 }
 
 void LotatoIngestor::setPaused(bool paused) {

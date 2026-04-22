@@ -49,19 +49,6 @@ void Store::begin() {
 }
 ```
 
-## Nanopb (Lotato LoDB rows)
-
-- **Sources of truth:** `lotato/*.proto` (e.g. `lotato_ingest_ttl.proto`, `lotato_mesh_node.proto`).
-- **Generated:** matching `lotato/*.pb.h` and `lotato/*.pb.c` (nanopb **0.4.9.1**, same as MeshCore `lib_deps`).
-- **Regenerate** from repo root after editing protos (adjust `NANO` if your PlatformIO libdeps path differs):
-
-```bash
-cd lotato
-NANO="../meshcore/.pio/libdeps/Heltec_v3_repeater/Nanopb"
-python3 "$NANO/generator/nanopb_generator.py" -I . -I "$NANO/generator/proto" \
-  lotato_ingest_ttl.proto lotato_mesh_node.proto
-```
-
 ## Where logic belongs
 
 | Layer | Put here |

@@ -20,7 +20,6 @@
 
 #include <LotatoConfig.h>
 #include <LotatoIngestor.h>
-#include <LotatoIngestTtl.h>
 #include <lofi/Lofi.h>
 #include <lofs/LoFS.h>
 #include <lolog/LoLog.h>
@@ -88,16 +87,17 @@ void h_status(locommand::Context& ctx) {
   const char* token_str = cfg.apiToken()[0] ? "set" : "(none)";
   const char* url_str = cfg.ingestOrigin()[0] ? cfg.ingestOrigin() : "(none)";
   const char* dbg_str = ::lolog::LoLog::isVerbose() ? "on" : "off";
-  const int due = g_self->nodeStore().countDueNodes();
+  const int hist_count = g_self->ingestHistory().count();
+  const int hist_cap   = g_self->ingestHistory().capacity();
   if (wl == WL_CONNECTED) {
-    ctx.out.appendf("WiFi: %s\nSSID: %s\nIP: %s\nNodes: %d\nDue: %d\nPaused: %s\nLast API Response: %s\nURL: %s\nToken: %s\nDebug: %s",
+    ctx.out.appendf("WiFi: %s\nSSID: %s\nIP: %s\nHistory: %d/%d\nPaused: %s\nLast API Response: %s\nURL: %s\nToken: %s\nDebug: %s",
                     wl_str, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                    g_self->nodeStore().count(), due,
+                    hist_count, hist_cap,
                     g_self->ingestor().isPaused() ? "yes" : "no", code_str, url_str, token_str, dbg_str);
   } else {
-    ctx.out.appendf("WiFi: %s\nSaved: %s\nNodes: %d\nDue: %d\nPaused: %s\nURL: %s\nToken: %s\nDebug: %s",
+    ctx.out.appendf("WiFi: %s\nSaved: %s\nHistory: %d/%d\nPaused: %s\nURL: %s\nToken: %s\nDebug: %s",
                     wl_str, cfg.ssid()[0] ? cfg.ssid() : "(none)",
-                    g_self->nodeStore().count(), due,
+                    hist_count, hist_cap,
                     g_self->ingestor().isPaused() ? "yes" : "no", url_str, token_str, dbg_str);
   }
 }
@@ -112,23 +112,39 @@ void h_resume(locommand::Context& ctx) {
   ctx.out.append("OK - ingest resumed");
 }
 
-void h_contacts(locommand::Context& ctx) {
-  LotatoConfig& cfg = LotatoConfig::instance();
-  g_self->nodeStore().dumpAllNodesDebug();
-  ctx.out.appendf("Nodes: %d\nDue: %d\nRefresh: %lus\nGC: %lus\n", g_self->nodeStore().count(),
-                  g_self->nodeStore().countDueNodes(), (unsigned long)cfg.ingestRefreshSecs(),
-                  (unsigned long)cfg.ingestGcStaleSecs());
+void h_ingest(locommand::Context& ctx) {
+  size_t limit = 0;
+  if (ctx.argc >= 1) {
+    int n = atoi(ctx.argv[0]);
+    if (n > 0) limit = (size_t)n;
+  }
+  std::vector<LotatoIngestHistory::Row> rows;
+  g_self->ingestHistory().snapshot(limit, rows);
+  ctx.out.appendf("Ingest history: %d/%d\n", g_self->ingestHistory().count(),
+                  g_self->ingestHistory().capacity());
+  const uint32_t now_ms = millis();
+  static const char* const hexd = "0123456789abcdef";
+  for (const auto& r : rows) {
+    char nid[10];
+    nid[0] = '!';
+    for (int i = 0; i < 4; i++) {
+      nid[1 + i * 2]     = hexd[(r.rec.pub_key[i] >> 4) & 0x0f];
+      nid[1 + i * 2 + 1] = hexd[r.rec.pub_key[i] & 0x0f];
+    }
+    nid[9] = '\0';
+    uint32_t age_s = (now_ms - r.last_posted_ms) / 1000u;
+    uint32_t m = age_s / 60u;
+    uint32_t s = age_s % 60u;
+    if (r.rec.gps_lat != 0 || r.rec.gps_lon != 0) {
+      ctx.out.appendf("%s \"%.32s\" type=%u posted=%lum%lus ago gps=%.4f,%.4f\n", nid, r.rec.name,
+                      (unsigned)r.rec.type, (unsigned long)m, (unsigned long)s,
+                      (double)r.rec.gps_lat / 1000000.0, (double)r.rec.gps_lon / 1000000.0);
+    } else {
+      ctx.out.appendf("%s \"%.32s\" type=%u posted=%lum%lus ago\n", nid, r.rec.name,
+                      (unsigned)r.rec.type, (unsigned long)m, (unsigned long)s);
+    }
+  }
 }
-
-void h_force(locommand::Context& ctx) {
-  g_self->nodeStore().flushAllTtl();
-  g_self->nodeStore().logFlushTargetsDebug();
-  const int due = g_self->nodeStore().countDueNodes();
-  ::lolog::LoLog::debug("lotato", "lotato CLI: force — TTL cleared for all nodes, due=%d", due);
-  ctx.out.appendf("OK - due nodes: %d", due);
-}
-
-void h_flush(locommand::Context& ctx) { h_force(ctx); }
 
 /* ── wifi root handlers ───────────────────────────────────────────── */
 
@@ -213,6 +229,10 @@ const locommand::ArgSpec k_wifi_forget_args[] = {
     {"ssid", "string", nullptr, true, "Network SSID to remove from known list"},
 };
 
+const locommand::ArgSpec k_ingest_args[] = {
+    {"n", "uint", nullptr, false, "Max entries to show (default: all)"},
+};
+
 }  // namespace
 
 /* ── CliGateway ─────────────────────────────────────────────────────── */
@@ -228,10 +248,9 @@ void CliGateway::registerLotatoEngine() {
   _eng_lotato.add("status", &h_status, nullptr, nullptr, "show lotato/ingest status");
   _eng_lotato.add("pause", &h_pause, nullptr, nullptr, "pause ingest (shortcut for config)");
   _eng_lotato.add("resume", &h_resume, nullptr, nullptr, "resume ingest (shortcut for config)");
-  _eng_lotato.add("contacts", &h_contacts, nullptr, nullptr, "node store summary");
-  _eng_lotato.add("force", &h_force, nullptr, nullptr, "clear TTL for all nodes (re-ingest all)");
-  _eng_lotato.add("flush", &h_flush, nullptr, nullptr, "alias of force");
-  _eng_lotato.setRootBrief("ingest status / force / contacts");
+  _eng_lotato.addWithArgs("ingest", &h_ingest, k_ingest_args, 1, nullptr,
+                           "recent ingest POSTs (newest first)");
+  _eng_lotato.setRootBrief("ingest status / history");
 }
 
 void CliGateway::registerWifiEngine() {
@@ -260,8 +279,7 @@ void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], 
   // Stage 2 — Lotato stack.
   LotatoConfig::instance().load();
   lofi::Lofi::instance().begin();
-  lotato_ingest_ttl_store().begin();
-  _node_store.begin();
+  _history.begin();
 
   lofi::Lofi::instance().setScanCompleteCallback(&CliGateway::onWifiScanComplete, nullptr);
   lofi::Lofi::instance().setConnectCompleteCallback(&CliGateway::onWifiConnectComplete, nullptr);
@@ -289,7 +307,7 @@ void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], 
 
 void CliGateway::tickServices() {
   lofi::Lofi::instance().serviceWifiScan();
-  _ingestor.service(&_node_store, _self_pub_key);
+  _ingestor.serviceTick(_self_pub_key);
   _reply_queue.service(millis(), *this);
 }
 
@@ -311,9 +329,16 @@ void CliGateway::onAdvertRecvInternal(const uint8_t pub_key[32], const uint8_t* 
   ::lolog::LoLog::debug("lotato", "advert: !%s name=\"%.32s\" type=%u hops=%u ts=%lu gps=%s", id_hex,
                         name, (unsigned)atype, (unsigned)path_len, (unsigned long)timestamp,
                         parser.hasLatLon() ? "yes" : "no");
-  bool ok = _node_store.put(pub_key, name, atype, timestamp, lat, lon);
-  ::lolog::LoLog::debug("lotato", "advert: !%s stored=%d (total=%d)", id_hex, ok ? 1 : 0,
-                        _node_store.count());
+  LotatoNodeRecord rec{};
+  memcpy(rec.pub_key, pub_key, 32);
+  strncpy(rec.name, name ? name : "", sizeof(rec.name) - 1);
+  rec.name[sizeof(rec.name) - 1] = '\0';
+  rec.type        = atype;
+  rec.last_advert = timestamp;
+  rec.gps_lat     = lat;
+  rec.gps_lon     = lon;
+  rec.magic       = LOTATO_NODE_MAGIC;
+  _ingestor.onAdvert(rec, _history, _self_pub_key);
 }
 
 bool CliGateway::hasPendingTxInternal() const {

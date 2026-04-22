@@ -17,8 +17,7 @@ void lotato_on_cfg_changed(void*) {
   lotato_ingest_restart_after_config();
 }
 
-constexpr uint32_t kVisMax = 30u * 86400u;
-constexpr uint32_t kGcMax  = 60u * 86400u;
+constexpr uint32_t kHistoryMax = 100u;
 
 }  // namespace
 
@@ -51,10 +50,9 @@ void LotatoConfig::refreshFromLoSettings() {
   losettings::LoSettings wf("lofi");
   lt.getString("ingest.url", _url, sizeof(_url), "");
   lt.getString("ingest.token", _token, sizeof(_token), "");
-  _ingest_paused      = lt.getBool("ingest.paused", false);
-  _ingest_visibility_secs = lt.getUInt("ingest.visibility_secs", 259200u);
-  _ingest_refresh_secs    = lt.getUInt("ingest.refresh_secs", 900u);
-  _ingest_gc_stale_secs   = lt.getUInt("ingest.gc_stale_secs", 259200u);
+  _ingest_paused       = lt.getBool("ingest.paused", false);
+  _ingest_refresh_secs = lt.getUInt("ingest.refresh_secs", 900u);
+  _ingest_history_max  = lt.getUInt("ingest.history_max", 10u);
   wf.getString("active.ssid", _ssid, sizeof(_ssid), "");
   wf.getString("active.psk", _pwd, sizeof(_pwd), "");
 }
@@ -104,43 +102,30 @@ void LotatoConfig::registerConfigSchema() {
        0,
        lotato_on_cfg_changed,
        nullptr},
-      {"ingest.visibility_secs",
-       losettings::ConfigValueKind::UInt32,
-       false,
-       0,
-       259200u,
-       nullptr,
-       "Mesh-heard visibility window for ingest (seconds)",
-       false,
-       true,
-       300u,
-       kVisMax,
-       lotato_on_cfg_changed,
-       nullptr},
       {"ingest.refresh_secs",
        losettings::ConfigValueKind::UInt32,
        false,
        0,
        900u,
        nullptr,
-       "Minimum seconds between successful ingest POSTs per visible node",
+       "Minimum seconds between successful ingest POSTs per node",
        false,
        true,
        60u,
        86400u,
        lotato_on_cfg_changed,
        nullptr},
-      {"ingest.gc_stale_secs",
+      {"ingest.history_max",
        losettings::ConfigValueKind::UInt32,
        false,
        0,
-       259200u,
+       10u,
        nullptr,
-       "Remove nodes not mesh-heard for this long (>= visibility_secs)",
+       "Max entries retained in the ingest history (LRU by last-posted)",
        false,
        true,
-       300u,
-       kGcMax,
+       1u,
+       kHistoryMax,
        lotato_on_cfg_changed,
        nullptr},
   };

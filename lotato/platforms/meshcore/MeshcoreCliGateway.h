@@ -17,8 +17,8 @@ class Identity;
 #include <locommand/Router.h>
 #include <lofs/FsBackend.h>
 #include <lomessage/Queue.h>
+#include <LotatoIngestHistory.h>
 #include <LotatoIngestor.h>
-#include <LotatoNodeStore.h>
 
 namespace lotato {
 namespace meshcore {
@@ -36,7 +36,7 @@ static constexpr size_t kMaxTxtChunk = 160;
  */
 class Delegate {
 public:
-  /** Mirror an advert into the node store; parses the meshcore wire format internally. */
+  /** Push the advert into the ingest queue; parses the meshcore wire format internally. */
   void onAdvertRecv(const mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp,
                     const uint8_t* app_data, size_t app_data_len);
 
@@ -99,8 +99,8 @@ public:
   bool enqueueTxtCliReply(const uint8_t pub_key[32], const uint8_t secret[32],
                           const uint8_t* out_path, uint8_t out_path_len, uint8_t path_hash_size,
                           uint32_t sender_ts, const char* text);
-  LotatoIngestor&  ingestor() { return _ingestor; }
-  LotatoNodeStore& nodeStore() { return _node_store; }
+  LotatoIngestor&      ingestor() { return _ingestor; }
+  LotatoIngestHistory& ingestHistory() { return _history; }
 
   /** Route context for async replies (wifi scan/connect completion) + chunked CLI replies. */
   struct RouteCtx {
@@ -126,11 +126,11 @@ private:
   lomessage::SendResult sendChunk(const uint8_t* data, size_t len, size_t chunk_idx,
                                   size_t total_chunks, bool is_final, void* user_ctx) override;
 
-  Delegate          _delegate;
-  mesh::Mesh*       _mesh = nullptr;
-  uint8_t           _self_pub_key[32]{};
-  LotatoIngestor    _ingestor;
-  LotatoNodeStore   _node_store;
+  Delegate            _delegate;
+  mesh::Mesh*         _mesh = nullptr;
+  uint8_t             _self_pub_key[32]{};
+  LotatoIngestor      _ingestor;
+  LotatoIngestHistory _history;
   locommand::Engine _eng_lotato{"lotato"};
   locommand::Engine _eng_wifi{"wifi"};
   locommand::Engine _eng_config{"config"};
