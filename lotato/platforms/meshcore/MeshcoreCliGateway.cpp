@@ -480,8 +480,8 @@ void CliGateway::deliverLongReply(uint32_t sender_ts, const char* text, char* re
   reply[0] = '\0';
   if (!text || !text[0]) return;
   size_t n = strlen(text);
-  if (n + 1 <= kCliReplyCap) {
-    // Fits in one TXT_MSG — let the caller's mesh send-path deliver it.
+  if (n <= kMaxTxtChunk && n + 1 <= kCliReplyCap) {
+    // Fits in one wire-safe TXT_MSG chunk — let the caller's mesh send-path deliver it.
     memcpy(reply, text, n + 1);
     return;
   }

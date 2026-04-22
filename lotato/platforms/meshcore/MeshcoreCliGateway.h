@@ -23,11 +23,11 @@ class Identity;
 namespace lotato {
 namespace meshcore {
 
-/** Admin TXT_MSG single-packet reply cap — must match upstream `main.cpp reply[160]` and
- *  `mesh temp[5 + 160]`. Replies ≤ this fit in one TXT_MSG; longer replies chunk via the FIFO. */
+/** Admin TXT_MSG single-packet reply scratch size — must match upstream `main.cpp reply[160]` and
+ *  `mesh temp[5 + 160]`. This is local staging capacity, not the wire-safe text budget. */
 static constexpr size_t kCliReplyCap = 160;
-/** Max text bytes per TXT_MSG chunk; equal to `kCliReplyCap` since both are the mesh wire budget. */
-static constexpr size_t kMaxTxtChunk = 160;
+/** Max wire-safe text bytes per TXT_MSG chunk (payload includes a 5-byte TXT header). */
+static constexpr size_t kMaxTxtChunk = 155;
 
 /**
  * Platform adapter singleton. The host hands over the mesh pointer + self identity at
