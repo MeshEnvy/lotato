@@ -33,8 +33,7 @@ static_assert(sizeof(LotatoNodeRecord) == 84, "LotatoNodeRecord layout changed")
  *
  * Entries are inserted on each successful `/api/nodes` POST. When the map exceeds the
  * `ingest.history_max` capacity, the entry with the oldest `last_posted_ms` is evicted.
- * `throttleDue` gates re-POSTs within `ingest.refresh_secs`. No persistence: reboots wipe
- * everything, which is intentional — the next advert for a known node simply re-POSTs.
+ * No persistence: reboots wipe everything, which is intentional.
  */
 class LotatoIngestHistory {
 public:
@@ -44,9 +43,6 @@ public:
   };
 
   void begin();
-
-  /** True if no entry exists for @p pub_key, or its last POST was >= `ingest.refresh_secs` ago. */
-  bool throttleDue(const uint8_t pub_key[32], uint32_t now_ms) const;
 
   /** Insert/update, then evict the oldest-posted entry if the map is over capacity. */
   void recordPosted(const LotatoNodeRecord& rec, uint32_t now_ms);

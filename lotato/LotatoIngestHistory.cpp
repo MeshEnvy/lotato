@@ -2,21 +2,10 @@
 
 #ifdef ESP32
 
-#include <LotatoConfig.h>
 #include <algorithm>
 
 void LotatoIngestHistory::begin() {
   if (!_mtx) _mtx = xSemaphoreCreateMutex();
-}
-
-bool LotatoIngestHistory::throttleDue(const uint8_t pub_key[32], uint32_t now_ms) const {
-  if (!_mtx) return true;
-  const uint32_t refresh_ms = LotatoConfig::instance().ingestRefreshSecs() * 1000u;
-  xSemaphoreTake(_mtx, portMAX_DELAY);
-  auto it = _rows.find(toKey(pub_key));
-  bool due = (it == _rows.end()) || ((uint32_t)(now_ms - it->second.last_posted_ms) >= refresh_ms);
-  xSemaphoreGive(_mtx);
-  return due;
 }
 
 void LotatoIngestHistory::recordPosted(const LotatoNodeRecord& rec, uint32_t now_ms) {

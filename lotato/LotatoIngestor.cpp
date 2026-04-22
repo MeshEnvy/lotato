@@ -584,8 +584,6 @@ void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& 
   }
   if (!g_self_pk_set) return;
 
-  if (!hist.throttleDue(rec.pub_key, millis())) return;
-
   ensure_worker();
   if (!g_q_mtx) return;
 

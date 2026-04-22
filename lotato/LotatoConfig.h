@@ -23,7 +23,6 @@ public:
   bool isIngestReady() const;
   bool ingestPaused() const { return _loaded ? _ingest_paused : false; }
 
-  uint32_t ingestRefreshSecs() const { return _ingest_refresh_secs; }
   uint32_t ingestHistoryMax() const { return _ingest_history_max; }
 
   const char* ssid() const { return _ssid; }
@@ -45,7 +44,6 @@ private:
   LotatoConfig()
       : _loaded(false),
         _ingest_paused(false),
-        _ingest_refresh_secs(900u),
         _ingest_history_max(10u) {
     _ssid[0] = _pwd[0] = _url[0] = _token[0] = '\0';
   }
@@ -54,7 +52,6 @@ private:
 
   bool _loaded;
   bool _ingest_paused;
-  uint32_t _ingest_refresh_secs;
   uint32_t _ingest_history_max;
   char _ssid[33];
   char _pwd[65];
