@@ -9,10 +9,6 @@ struct LotatoNodeRecord;
 
 /** Apply lotato STA policy (public DNS override if LOTATO_STA_FORCE_PUBLIC_DNS=1). */
 void lotato_register_sta_dns_override();
-/** No-op (STA event logging is now in lofi::Lofi); kept for call-site compat. */
-void lotato_register_wifi_event_logging();
-/** No-op (failover lives in lofi::Lofi); kept for call-site compat. */
-void lotato_register_sta_known_wifi_failover();
 /** Proxy to `lofi::Lofi::staFailoverSuppress` (scan vs connect gate). */
 void lotato_sta_failover_suppress(bool suppress);
 /** Drop pending ingest batch after LoSettings-backed ingest config changes. */

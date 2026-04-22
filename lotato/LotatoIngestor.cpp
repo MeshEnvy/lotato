@@ -122,7 +122,7 @@ static bool lotato_post(const char* api_path, const char* post_label, const char
 
 }  // namespace
 
-// --- STA DNS / event logging / known-wifi failover ---
+// --- STA DNS policy + failover suppression ---
 
 void lotato_register_sta_dns_override() {
 #if LOTATO_STA_FORCE_PUBLIC_DNS
@@ -130,17 +130,7 @@ void lotato_register_sta_dns_override() {
 #endif
 }
 
-void lotato_register_wifi_event_logging() {
-  // Lofi already logs STA events via weak `lofi_log`; the strong override below routes them through LoLog.
-}
-
-void lotato_register_sta_known_wifi_failover() {
-  // Implemented by lofi::Lofi::begin() (reads `known_wifi` LoDB table).
-}
-
 void lotato_sta_failover_suppress(bool suppress) { lofi::Lofi::instance().staFailoverSuppress(suppress); }
-
-extern "C" void lofi_log(const char* msg) { ::lolog::LoLog::debug("lofi", "%s", msg); }
 
 namespace {
 
