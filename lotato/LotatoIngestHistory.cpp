@@ -2,6 +2,7 @@
 
 #ifdef ESP32
 
+#include <LotatoConfig.h>
 #include <algorithm>
 
 void LotatoIngestHistory::begin() {
