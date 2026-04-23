@@ -1,5 +1,7 @@
 # lotato
 
+![Lotato logo](https://raw.githubusercontent.com/MeshEnvy/lotato/main/logo.png)
+
 Lotato is the firmware-only [Potato Mesh](https://github.com/l5yth/potato-mesh) ingestor for MeshCore*.
 
 > * Meshtastic coming soon!
