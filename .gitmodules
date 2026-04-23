@@ -1,9 +1,9 @@
 [submodule "meshtastic"]
 	path = meshtastic
-	url = https://github.com/MeshEnvy/meshtastic-firmware-lotato
+	url = https://github.com/MeshEnvy/meshtastic-firmware
 [submodule "meshcore"]
 	path = meshcore
-	url = https://github.com/MeshEnvy/MeshCore-lotato
+	url = https://github.com/MeshEnvy/meshcore-firmware
 [submodule "potato-mesh"]
 	path = potato-mesh
 	url = https://github.com/l5yth/potato-mesh
