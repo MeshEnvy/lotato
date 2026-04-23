@@ -8,6 +8,7 @@
 #include <lolog/LoLog.h>
 #include <lofi/Lofi.h>
 #include <losettings/LoSettings.h>
+#include <lostar/NodeId.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -24,7 +25,6 @@
 #ifndef LOTATO_INGESTORS_API_PATH
 #define LOTATO_INGESTORS_API_PATH "/api/ingestors"
 #endif
-/** Ingestor ``version`` field (required by web ``upsert_ingestor``); override at build time if needed. */
 /** Default aligns with :data:`HEARTBEAT_INTERVAL_SECS` in ``data/mesh_ingestor/ingestors.py``. */
 #ifndef LOTATO_INGESTOR_HEARTBEAT_MS
 #define LOTATO_INGESTOR_HEARTBEAT_MS (60UL * 60UL * 1000UL)
@@ -140,25 +140,25 @@ constexpr size_t kBatchMaxSlots = LOTATO_INGEST_BATCH_MAX_SLOTS;
 char g_batch_body[kBodyCap]{};
 uint16_t g_batch_len = 0;
 uint8_t g_batch_n = 0;
-uint8_t g_batch_keys[kBatchMaxSlots][32]{};
-char g_batch_node_ids[kBatchMaxSlots][12]{};
+lostar::NodeId g_batch_ids[kBatchMaxSlots]{};
+char g_batch_node_id_strs[kBatchMaxSlots][12]{};
 LotatoNodeRecord g_batch_records[kBatchMaxSlots]{};
 LotatoIngestHistory* g_batch_hist = nullptr;
 uint32_t g_batch_next_retry_ms = 0;
 uint32_t g_batch_fail_backoff_ms = 0;
 
-/** Set once the gateway hands over the node's own pub_key. Used by the heartbeat path even on a silent mesh. */
-uint8_t g_self_pk[lotato::ingest_platform::kPublicKeyBytes]{};
-bool    g_self_pk_set = false;
+/** Canonical ingestor identity; set on first onAdvert/serviceTick call. */
+lostar::NodeId g_self_id = 0;
+bool           g_self_id_set = false;
 
-/** Scratch buffers for body rebuild — sized with kBodyCap so `build_record_ingest_json` has room. */
+/** Scratch buffers for body rebuild — sized with kBodyCap so the platform payload builder has room. */
 static char g_build_frag[kBodyCap];
 static char g_build_merge_tmp[kBodyCap];
 
 static uint32_t g_last_wifi_down_log_ms = 0;
 /** Wall-clock start_time for ingestor payload; set first time we see plausible Unix time. */
 static uint32_t g_ingestor_start_unix = 0;
-/** millis() of last successful ``POST /api/ingestors`` (reference: Python ingestor heartbeat). */
+/** millis() of last successful ``POST /api/ingestors``. */
 static uint32_t g_ingestor_heartbeat_ok_ms = 0;
 SemaphoreHandle_t g_q_mtx = nullptr;
 TaskHandle_t g_worker = nullptr;
@@ -200,9 +200,9 @@ void lotato_ingest_clear_queue() {
 
 static const char* find_ingestor_field(const char* json) { return strstr(json, ",\"ingestor\""); }
 
-/** Combine two firmware-built /api/nodes bodies `{ "<id>": {...}, "ingestor": "<self>" }` into one object. */
-static bool merge_ingest_bodies(const char* base, const char* next, uint16_t next_len, char* out, size_t out_cap,
-                                uint16_t* out_len) {
+/** Combine two firmware-built /api/nodes bodies into one. */
+static bool merge_ingest_bodies(const char* base, const char* next, uint16_t next_len, char* out,
+                                size_t out_cap, uint16_t* out_len) {
   const char* ig_base = find_ingestor_field(base);
   const char* ig_next = find_ingestor_field(next);
   if (!ig_base || !ig_next) return false;
@@ -242,31 +242,10 @@ static void format_ingest_post_label(char* out, size_t cap, const char (*ids)[12
   }
 }
 
-static void bin_to_hex_lower_pre(const uint8_t* b, size_t n, char* out) {
-  static const char* hexd = "0123456789abcdef";
-  for (size_t i = 0; i < n; i++) {
-    out[i * 2] = hexd[b[i] >> 4];
-    out[i * 2 + 1] = hexd[b[i] & 0x0f];
-  }
-  out[n * 2] = '\0';
-}
-
-static void format_node_id_pre(char out[12], const uint8_t pub_key[lotato::ingest_platform::kPublicKeyBytes]) {
-  out[0] = '!';
-  bin_to_hex_lower_pre(pub_key, 4, out + 1);
-}
-
-static bool self_pub_key_nonzero(const uint8_t pk[lotato::ingest_platform::kPublicKeyBytes]) {
-  for (size_t i = 0; i < lotato::ingest_platform::kPublicKeyBytes; i++) {
-    if (pk[i] != 0) return true;
-  }
-  return false;
-}
-
-static bool build_ingestor_heartbeat_body(const uint8_t self_pub[lotato::ingest_platform::kPublicKeyBytes],
-                                          char* buf, size_t cap, uint16_t* out_len) {
+static bool build_ingestor_heartbeat_body(lostar::NodeId self_id, char* buf, size_t cap,
+                                          uint16_t* out_len) {
   char node_id[12];
-  format_node_id_pre(node_id, self_pub);
+  lostar::format_canonical(self_id, node_id, sizeof(node_id));
   time_t t = time(nullptr);
   const bool unix_plausible = (t > (time_t)1700000000);
   const char* ingestor_version =
@@ -284,17 +263,16 @@ static bool build_ingestor_heartbeat_body(const uint8_t self_pub[lotato::ingest_
                  node_id, (unsigned long)g_ingestor_start_unix, (unsigned long)t, ingestor_version,
                  lotato::ingest_platform::protocol_name());
   } else {
-    n = snprintf(buf, cap, "{\"node_id\":\"%s\",\"version\":\"%s\",\"protocol\":\"%s\"}", node_id, ingestor_version,
-                 lotato::ingest_platform::protocol_name());
+    n = snprintf(buf, cap, "{\"node_id\":\"%s\",\"version\":\"%s\",\"protocol\":\"%s\"}", node_id,
+                 ingestor_version, lotato::ingest_platform::protocol_name());
   }
   if (n <= 0 || (size_t)n >= cap) return false;
   *out_len = (uint16_t)n;
   return true;
 }
 
-/** Before node batches, register like Python ``queue_ingestor_heartbeat`` (meshcore ``_process_self_info``). */
 static void maybe_post_ingestor_heartbeat() {
-  if (!g_self_pk_set || !self_pub_key_nonzero(g_self_pk)) return;
+  if (!g_self_id_set || g_self_id == 0) return;
   if (WiFi.status() != WL_CONNECTED) return;
   if (!LotatoConfig::instance().isIngestReady()) return;
   uint32_t now_ms = millis();
@@ -305,7 +283,7 @@ static void maybe_post_ingestor_heartbeat() {
 
   char body[320];
   uint16_t blen = 0;
-  if (!build_ingestor_heartbeat_body(g_self_pk, body, sizeof(body), &blen)) {
+  if (!build_ingestor_heartbeat_body(g_self_id, body, sizeof(body), &blen)) {
     ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor heartbeat JSON build failed");
     return;
   }
@@ -321,99 +299,17 @@ static void maybe_post_ingestor_heartbeat() {
   }
 }
 
-static bool append_json_escaped_name_pre(char* dest, size_t dest_size, const char* name) {
-  if (dest_size < 3) return false;
-  char* p = dest;
-  char* end = dest + dest_size - 1;
-  *p++ = '"';
-  while (name && *name && p < end - 1) {
-    unsigned char c = (unsigned char)*name++;
-    if (c == '"' || c == '\\') {
-      if (p >= end - 2) break;
-      *p++ = '\\';
-      *p++ = (char)c;
-    } else if (c >= 32 && c < 127) {
-      *p++ = (char)c;
-    } else {
-      *p++ = '?';
-    }
+static bool build_record_fragment(lostar::NodeId self_id, const LotatoNodeRecord& rec, char* body,
+                                  size_t body_cap, uint16_t* out_len, lostar::NodeId* id_out,
+                                  char node_id_str[12]) {
+  if (!lotato::ingest_platform::build_node_payload(rec, self_id, body, body_cap, out_len, id_out)) {
+    return false;
   }
-  if (p >= end) return false;
-  *p++ = '"';
-  *p = '\0';
+  if (node_id_str) lostar::format_canonical(id_out ? *id_out : 0u, node_id_str, 12);
   return true;
 }
 
-static bool build_record_ingest_json(const uint8_t self_pub_key[lotato::ingest_platform::kPublicKeyBytes],
-                                     const LotatoNodeRecord& rec, char* body, size_t body_cap, uint16_t* out_len,
-                                     char node_id[12]) {
-  format_node_id_pre(node_id, rec.pub_key);
-  char ingestor_id[12];
-  char pub_hex[65];
-  char name_json[40];
-  char short_hex[5];
-
-  format_node_id_pre(ingestor_id, self_pub_key);
-  bin_to_hex_lower_pre(rec.pub_key, lotato::ingest_platform::kPublicKeyBytes, pub_hex);
-  if (!append_json_escaped_name_pre(name_json, sizeof(name_json), rec.name)) {
-    strncpy(name_json, "\"?\"", sizeof(name_json));
-    name_json[sizeof(name_json) - 1] = '\0';
-  }
-  bin_to_hex_lower_pre(rec.pub_key, 2, short_hex);
-
-  uint32_t num = ((uint32_t)rec.pub_key[0] << 24) | ((uint32_t)rec.pub_key[1] << 16) |
-                 ((uint32_t)rec.pub_key[2] << 8) | (uint32_t)rec.pub_key[3];
-  uint32_t last_heard = rec.last_advert;
-  if (last_heard == 0) last_heard = (uint32_t)(millis() / 1000);
-
-  const char* role = lotato::ingest_platform::role_for_advert_type(rec.type);
-  const char* proto = lotato::ingest_platform::protocol_name();
-  int n;
-
-  if (rec.gps_lat != 0 || rec.gps_lon != 0) {
-    double lat = (double)rec.gps_lat / 1000000.0;
-    double lon = (double)rec.gps_lon / 1000000.0;
-    if (role) {
-      n = snprintf(body, body_cap,
-                   "{\"%s\":{\"num\":%lu,\"lastHeard\":%lu,\"protocol\":\"%s\","
-                   "\"user\":{\"longName\":%s,\"shortName\":\"%s\",\"publicKey\":\"%s\",\"role\":\"%s\"},"
-                   "\"position\":{\"latitude\":%.6f,\"longitude\":%.6f,\"time\":%lu}},"
-                   "\"ingestor\":\"%s\"}",
-                   node_id, (unsigned long)num, (unsigned long)last_heard, proto, name_json, short_hex, pub_hex, role,
-                   lat, lon, (unsigned long)last_heard, ingestor_id);
-    } else {
-      n = snprintf(body, body_cap,
-                   "{\"%s\":{\"num\":%lu,\"lastHeard\":%lu,\"protocol\":\"%s\","
-                   "\"user\":{\"longName\":%s,\"shortName\":\"%s\",\"publicKey\":\"%s\"},"
-                   "\"position\":{\"latitude\":%.6f,\"longitude\":%.6f,\"time\":%lu}},"
-                   "\"ingestor\":\"%s\"}",
-                   node_id, (unsigned long)num, (unsigned long)last_heard, proto, name_json, short_hex, pub_hex, lat,
-                   lon, (unsigned long)last_heard, ingestor_id);
-    }
-  } else {
-    if (role) {
-      n = snprintf(body, body_cap,
-                   "{\"%s\":{\"num\":%lu,\"lastHeard\":%lu,\"protocol\":\"%s\","
-                   "\"user\":{\"longName\":%s,\"shortName\":\"%s\",\"publicKey\":\"%s\",\"role\":\"%s\"}},"
-                   "\"ingestor\":\"%s\"}",
-                   node_id, (unsigned long)num, (unsigned long)last_heard, proto, name_json, short_hex, pub_hex, role,
-                   ingestor_id);
-    } else {
-      n = snprintf(body, body_cap,
-                   "{\"%s\":{\"num\":%lu,\"lastHeard\":%lu,\"protocol\":\"%s\","
-                   "\"user\":{\"longName\":%s,\"shortName\":\"%s\",\"publicKey\":\"%s\"}},"
-                   "\"ingestor\":\"%s\"}",
-                   node_id, (unsigned long)num, (unsigned long)last_heard, proto, name_json, short_hex, pub_hex,
-                   ingestor_id);
-    }
-  }
-
-  if (n <= 0 || (size_t)n >= body_cap) return false;
-  *out_len = (uint16_t)n;
-  return true;
-}
-
-/** Regenerate g_batch_body from g_batch_records[0..g_batch_n]. Caller holds g_q_mtx. Returns false on overflow. */
+/** Regenerate g_batch_body from g_batch_records[0..g_batch_n]. Caller holds g_q_mtx. */
 static bool rebuild_batch_body_locked() {
   if (g_batch_n == 0) {
     g_batch_body[0] = '\0';
@@ -421,8 +317,10 @@ static bool rebuild_batch_body_locked() {
     return true;
   }
   uint16_t flen = 0;
+  lostar::NodeId id = 0;
   char nid[12];
-  if (!build_record_ingest_json(g_self_pk, g_batch_records[0], g_build_frag, sizeof(g_build_frag), &flen, nid)) {
+  if (!build_record_fragment(g_self_id, g_batch_records[0], g_build_frag, sizeof(g_build_frag), &flen,
+                             &id, nid)) {
     return false;
   }
   if (flen + 1 > kBodyCap) return false;
@@ -430,12 +328,13 @@ static bool rebuild_batch_body_locked() {
   g_batch_len = flen;
   for (uint8_t i = 1; i < g_batch_n; i++) {
     uint16_t fl = 0;
-    if (!build_record_ingest_json(g_self_pk, g_batch_records[i], g_build_frag, sizeof(g_build_frag), &fl, nid)) {
+    if (!build_record_fragment(g_self_id, g_batch_records[i], g_build_frag, sizeof(g_build_frag),
+                               &fl, &id, nid)) {
       return false;
     }
     uint16_t merged_len = 0;
-    if (!merge_ingest_bodies(g_batch_body, g_build_frag, fl, g_build_merge_tmp, sizeof(g_build_merge_tmp),
-                             &merged_len)) {
+    if (!merge_ingest_bodies(g_batch_body, g_build_frag, fl, g_build_merge_tmp,
+                             sizeof(g_build_merge_tmp), &merged_len)) {
       return false;
     }
     memcpy(g_batch_body, g_build_merge_tmp, merged_len + 1);
@@ -446,7 +345,7 @@ static bool rebuild_batch_body_locked() {
 
 bool ingest_try_step() {
   static char local_body[kBodyCap];
-  static uint8_t local_keys[kBatchMaxSlots][32];
+  static lostar::NodeId local_ids[kBatchMaxSlots];
   static LotatoNodeRecord local_records[kBatchMaxSlots];
   uint16_t local_len = 0;
   uint8_t local_n = 0;
@@ -483,10 +382,10 @@ bool ingest_try_step() {
   local_len = g_batch_len;
   memcpy(local_body, g_batch_body, local_len + 1);
   local_n = g_batch_n;
-  memcpy(local_keys, g_batch_keys, local_n * sizeof(local_keys[0]));
+  memcpy(local_ids, g_batch_ids, local_n * sizeof(local_ids[0]));
   memcpy(local_records, g_batch_records, local_n * sizeof(local_records[0]));
   local_hist = g_batch_hist;
-  for (uint8_t i = 0; i < local_n; i++) memcpy(batch_ids[i], g_batch_node_ids[i], 12);
+  for (uint8_t i = 0; i < local_n; i++) memcpy(batch_ids[i], g_batch_node_id_strs[i], 12);
 
   format_ingest_post_label(post_label, sizeof(post_label), batch_ids, local_n);
   xSemaphoreGive(g_q_mtx);
@@ -566,23 +465,25 @@ uint8_t LotatoIngestor::pendingQueueDepth() const { return lotato_ingest_queue_d
 void LotatoIngestor::restartAfterConfigChange() { lotato_ingest_clear_queue(); }
 
 void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& hist,
-                              const uint8_t self_pub_key[32]) {
+                              lostar::NodeId self_id) {
   if (ingest_paused() || !LotatoConfig::instance().isIngestReady()) return;
-  if (self_pub_key && !g_self_pk_set) {
-    memcpy(g_self_pk, self_pub_key, lotato::ingest_platform::kPublicKeyBytes);
-    g_self_pk_set = true;
+  if (self_id != 0 && !g_self_id_set) {
+    g_self_id = self_id;
+    g_self_id_set = true;
   }
-  if (!g_self_pk_set) return;
+  if (!g_self_id_set) return;
 
   ensure_worker();
   if (!g_q_mtx) return;
+
+  lostar::NodeId rec_id = lotato::ingest_platform::node_id_from_record(rec);
 
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
   g_batch_hist = &hist;
 
   int slot = -1;
   for (uint8_t i = 0; i < g_batch_n; i++) {
-    if (memcmp(g_batch_keys[i], rec.pub_key, 32) == 0) {
+    if (g_batch_ids[i] == rec_id) {
       slot = (int)i;
       break;
     }
@@ -601,8 +502,9 @@ void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& 
       ::lolog::LoLog::debug("lotato", "ingest: batch full (%u), dropping advert", (unsigned)g_batch_n);
       return;
     }
-    memcpy(g_batch_keys[g_batch_n], rec.pub_key, 32);
-    format_node_id_pre(g_batch_node_ids[g_batch_n], rec.pub_key);
+    g_batch_ids[g_batch_n] = rec_id;
+    lostar::format_canonical(rec_id, g_batch_node_id_strs[g_batch_n],
+                             sizeof(g_batch_node_id_strs[g_batch_n]));
     g_batch_records[g_batch_n] = rec;
     g_batch_n++;
     if (!rebuild_batch_body_locked()) {
@@ -616,10 +518,10 @@ void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& 
   if (have_work && WiFi.status() == WL_CONNECTED) notify_worker();
 }
 
-void LotatoIngestor::serviceTick(const uint8_t self_pub_key[32]) {
-  if (self_pub_key && !g_self_pk_set) {
-    memcpy(g_self_pk, self_pub_key, lotato::ingest_platform::kPublicKeyBytes);
-    g_self_pk_set = true;
+void LotatoIngestor::serviceTick(lostar::NodeId self_id) {
+  if (self_id != 0 && !g_self_id_set) {
+    g_self_id = self_id;
+    g_self_id_set = true;
   }
   if (ingest_paused() || !LotatoConfig::instance().isIngestReady()) return;
   ensure_worker();

@@ -10,30 +10,21 @@
 #include <unordered_map>
 #include <vector>
 
+#include <lostar/NodeId.h>
+
 /**
- * In-memory wire record per node. Fixed size: 84 bytes.
- * magic == LOTATO_NODE_MAGIC when the record is valid.
+ * `LotatoNodeRecord` is the platform-specific advert/nodeinfo payload carried through the
+ * shared ingest pipeline. The shared ingestor treats it as an opaque value (sizeof, memcpy);
+ * it only ever interprets fields through `lotato::ingest_platform::*` hooks defined in each
+ * platform's `IngestPlatform.h` (forwarded by `LotatoIngestPlatform.h`).
  */
-struct LotatoNodeRecord {
-  uint8_t  pub_key[32];
-  char     name[32];
-  uint8_t  type;
-  uint8_t  _pad[3];
-  uint32_t last_advert;
-  int32_t  gps_lat;
-  int32_t  gps_lon;
-  uint32_t magic;
-};
-static_assert(sizeof(LotatoNodeRecord) == 84, "LotatoNodeRecord layout changed");
 
-#define LOTATO_NODE_MAGIC 0x4C4F5441u
+#include <LotatoIngestPlatform.h>
 
 /**
- * Ephemeral ingest history keyed by the node's 32-byte public key.
- *
- * Entries are inserted on each successful `/api/nodes` POST. When the map exceeds the
- * `ingest.history_max` capacity, the entry with the oldest `last_posted_ms` is evicted.
- * No persistence: reboots wipe everything, which is intentional.
+ * Ephemeral ingest history keyed by `lostar::NodeId` (the web-canonical low bits). Entries are
+ * inserted on each successful `/api/nodes` POST. When the map exceeds `ingest.history_max`
+ * capacity, the entry with the oldest `last_posted_ms` is evicted.
  */
 class LotatoIngestHistory {
 public:
@@ -54,29 +45,8 @@ public:
   int capacity() const;
 
 private:
-  struct PubKey32 {
-    uint8_t b[32];
-    bool operator==(const PubKey32& o) const { return memcmp(b, o.b, 32) == 0; }
-  };
-  struct PubKey32Hash {
-    size_t operator()(const PubKey32& k) const noexcept {
-      size_t h = 2166136261u;
-      for (int i = 0; i < 32; i++) {
-        h ^= (unsigned char)k.b[i];
-        h *= 16777619u;
-      }
-      return h;
-    }
-  };
-
-  static PubKey32 toKey(const uint8_t pub_key[32]) {
-    PubKey32 k{};
-    memcpy(k.b, pub_key, 32);
-    return k;
-  }
-
-  mutable std::unordered_map<PubKey32, Row, PubKey32Hash> _rows;
-  mutable SemaphoreHandle_t                               _mtx = nullptr;
+  mutable std::unordered_map<lostar::NodeId, Row> _rows;
+  mutable SemaphoreHandle_t                       _mtx = nullptr;
 };
 
-#endif // ESP32
+#endif  // ESP32

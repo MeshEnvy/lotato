@@ -1,6 +1,6 @@
 #include "MeshcoreCliGateway.h"
 
-#ifdef ESP32
+#if defined(ESP32) && defined(LOTATO_PLATFORM_MESHCORE)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -11,21 +11,23 @@
 #include <Identity.h>
 #include <Packet.h>
 #include <helpers/AdvertDataHelpers.h>
-#include <helpers/ClientACL.h>     // OUT_PATH_UNKNOWN
+#include <helpers/ClientACL.h>      // OUT_PATH_UNKNOWN
 #include <helpers/TxtDataHelpers.h>  // TXT_TYPE_CLI_DATA
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <esp_log.h>
 
+#include <LotatoCli.h>
 #include <LotatoConfig.h>
 #include <LotatoIngestor.h>
+#include <LotatoIngestHistory.h>
 #include <lofi/Lofi.h>
 #include <lolog/LoLog.h>
 #include <lomessage/Buffer.h>
 #include <lomessage/Split.h>
 #include <lostar/LoStar.h>
-#include <losettings/ConfigHub.h>
+#include <lostar/NodeId.h>
 
 namespace lotato {
 namespace meshcore {
@@ -37,15 +39,9 @@ constexpr size_t kDispatchBufferBytes = 1280;
 
 /**
  * Inter-chunk delay between reply FIFO emissions. Must be ≥ the LoRa airtime for one ~160-byte
- * TXT_MSG at the configured radio params so we don't outrun the radio TX queue. Upstream used
- * 600 ms for a single reply; for chunked delivery we can cruise closer to airtime since the client
- * is the only RX target and the radio serializes TX internally anyway.
+ * TXT_MSG at the configured radio params so we don't outrun the radio TX queue.
  */
 constexpr unsigned long kInterChunkDelayMs = 200;
-
-struct CliCtx {
-  uint32_t sender_ts;
-};
 
 /** Opaque routing ctx copied into each `lomessage::Queue` job; consumed by the gateway's Sink. */
 struct CliReplyRoute {
@@ -59,239 +55,18 @@ struct CliReplyRoute {
 
 CliGateway* g_self = nullptr;
 
-void runWifiScanCli(lomessage::Buffer& out) {
-  lofi::Lofi& lf = lofi::Lofi::instance();
-  lf.serviceWifiScan();
-  if (lf.scanSnapshotCount() > 0 && !g_self->cliBusy()) {
-    lf.formatScanBody(out);
-    return;
-  }
-  if (g_self->cliBusy()) {
-    out.append("WiFi scan in progress...");
-    return;
-  }
-  lf.requestWifiScan();
-  out.append("Scanning for WiFi devices...");
+/** Build a lostar::NodeRef for the caller from its meshcore-native admin identity. */
+void fill_caller_ref(lostar::NodeRef& out, const uint8_t pub_key[32]) {
+  out.id = ((uint32_t)pub_key[0] << 24) | ((uint32_t)pub_key[1] << 16) |
+           ((uint32_t)pub_key[2] << 8)  | (uint32_t)pub_key[3];
+  out.ctx_len = 32 <= LOSTAR_NODEREF_CTX_CAP ? 32 : LOSTAR_NODEREF_CTX_CAP;
+  memcpy(out.ctx, pub_key, out.ctx_len);
 }
 
-/* ── lotato root handlers ─────────────────────────────────────────── */
-
-void h_status(locommand::Context& ctx) {
-  LotatoConfig& cfg = LotatoConfig::instance();
-  wl_status_t wl = WiFi.status();
-  const char* wl_str = (wl == WL_CONNECTED) ? "connected" : "not connected";
-  int code = g_self->ingestor().lastHttpCode();
-  char code_str[12];
-  if (code == 0) strcpy(code_str, "none");
-  else snprintf(code_str, sizeof(code_str), "%d", code);
-  const char* token_str = cfg.apiToken()[0] ? "set" : "(none)";
-  const char* url_str = cfg.ingestOrigin()[0] ? cfg.ingestOrigin() : "(none)";
-  const char* dbg_str = ::lolog::LoLog::isVerbose() ? "on" : "off";
-  const int hist_count = g_self->ingestHistory().count();
-  const int hist_cap   = g_self->ingestHistory().capacity();
-  if (wl == WL_CONNECTED) {
-    ctx.out.appendf("WiFi: %s\nSSID: %s\nIP: %s\nHistory: %d/%d\nPaused: %s\nLast API Response: %s\nURL: %s\nToken: %s\nDebug: %s",
-                    wl_str, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                    hist_count, hist_cap,
-                    g_self->ingestor().isPaused() ? "yes" : "no", code_str, url_str, token_str, dbg_str);
-  } else {
-    ctx.out.appendf("WiFi: %s\nSaved: %s\nHistory: %d/%d\nPaused: %s\nURL: %s\nToken: %s\nDebug: %s",
-                    wl_str, cfg.ssid()[0] ? cfg.ssid() : "(none)",
-                    hist_count, hist_cap,
-                    g_self->ingestor().isPaused() ? "yes" : "no", url_str, token_str, dbg_str);
-  }
+lostar::NodeId self_id_from_pub_key(const uint8_t pub_key[32]) {
+  return ((uint32_t)pub_key[0] << 24) | ((uint32_t)pub_key[1] << 16) |
+         ((uint32_t)pub_key[2] << 8)  | (uint32_t)pub_key[3];
 }
-
-void h_pause(locommand::Context& ctx) {
-  g_self->ingestor().setPaused(true);
-  ctx.out.append("OK - ingest paused");
-}
-
-void h_resume(locommand::Context& ctx) {
-  g_self->ingestor().setPaused(false);
-  ctx.out.append("OK - ingest resumed");
-}
-
-/** Join argv tokens into @p valbuf (same pattern as `config set` values). */
-static bool join_argv_value(locommand::Context& ctx, char* valbuf, size_t val_cap) {
-  valbuf[0] = '\0';
-  size_t pos = 0;
-  for (int i = 0; i < ctx.argc && pos + 1 < val_cap; i++) {
-    if (i > 0 && pos + 1 < val_cap) valbuf[pos++] = ' ';
-    const char* p = ctx.argv[i];
-    size_t l = strlen(p);
-    if (pos + l >= val_cap) return false;
-    memcpy(valbuf + pos, p, l);
-    pos += l;
-    valbuf[pos] = '\0';
-  }
-  return true;
-}
-
-void h_endpoint(locommand::Context& ctx) {
-  if (ctx.argc < 1) {
-    ctx.printHelp();
-    return;
-  }
-  static char valbuf[320];
-  if (!join_argv_value(ctx, valbuf, sizeof(valbuf))) {
-    ctx.out.append("Err - value too long\n");
-    return;
-  }
-  char err[128];
-  if (!losettings::ConfigHub::instance().setFromString("lotato.ingest.url", valbuf, err, sizeof(err))) {
-    ctx.out.appendf("Err - %s\n", err);
-    return;
-  }
-  ctx.out.append("OK\n");
-}
-
-void h_auth(locommand::Context& ctx) {
-  if (ctx.argc < 1) {
-    ctx.printHelp();
-    return;
-  }
-  static char valbuf[320];
-  if (!join_argv_value(ctx, valbuf, sizeof(valbuf))) {
-    ctx.out.append("Err - value too long\n");
-    return;
-  }
-  char err[128];
-  if (!losettings::ConfigHub::instance().setFromString("lotato.ingest.token", valbuf, err, sizeof(err))) {
-    ctx.out.appendf("Err - %s\n", err);
-    return;
-  }
-  ctx.out.append("OK\n");
-}
-
-void h_ingest(locommand::Context& ctx) {
-  size_t limit = 0;
-  if (ctx.argc >= 1) {
-    int n = atoi(ctx.argv[0]);
-    if (n > 0) limit = (size_t)n;
-  }
-  std::vector<LotatoIngestHistory::Row> rows;
-  g_self->ingestHistory().snapshot(limit, rows);
-  ctx.out.appendf("Ingest history: %d/%d\n", g_self->ingestHistory().count(),
-                  g_self->ingestHistory().capacity());
-  const uint32_t now_ms = millis();
-  static const char* const hexd = "0123456789abcdef";
-  for (const auto& r : rows) {
-    char nid[10];
-    nid[0] = '!';
-    for (int i = 0; i < 4; i++) {
-      nid[1 + i * 2]     = hexd[(r.rec.pub_key[i] >> 4) & 0x0f];
-      nid[1 + i * 2 + 1] = hexd[r.rec.pub_key[i] & 0x0f];
-    }
-    nid[9] = '\0';
-    uint32_t age_s = (now_ms - r.last_posted_ms) / 1000u;
-    uint32_t m = age_s / 60u;
-    uint32_t s = age_s % 60u;
-    if (r.rec.gps_lat != 0 || r.rec.gps_lon != 0) {
-      ctx.out.appendf("%s \"%.32s\" type=%u posted=%lum%lus ago gps=%.4f,%.4f\n", nid, r.rec.name,
-                      (unsigned)r.rec.type, (unsigned long)m, (unsigned long)s,
-                      (double)r.rec.gps_lat / 1000000.0, (double)r.rec.gps_lon / 1000000.0);
-    } else {
-      ctx.out.appendf("%s \"%.32s\" type=%u posted=%lum%lus ago\n", nid, r.rec.name,
-                      (unsigned)r.rec.type, (unsigned long)m, (unsigned long)s);
-    }
-  }
-}
-
-/* ── wifi root handlers ───────────────────────────────────────────── */
-
-void h_wifi_status(locommand::Context& ctx) {
-  LotatoConfig& cfg = LotatoConfig::instance();
-  wl_status_t wl = WiFi.status();
-  if (wl == WL_CONNECTED) {
-    ctx.out.appendf("WiFi: connected\nSSID: %s\nIP: %s", WiFi.SSID().c_str(),
-                    WiFi.localIP().toString().c_str());
-  } else {
-    ctx.out.appendf("WiFi: not connected\nSaved: %s\nUse: wifi scan",
-                    cfg.ssid()[0] ? cfg.ssid() : "(none)");
-  }
-}
-
-void h_wifi_scan(locommand::Context& ctx) { runWifiScanCli(ctx.out); }
-
-void h_wifi_connect(locommand::Context& ctx) {
-  auto* lc = static_cast<CliCtx*>(ctx.app_ctx);
-  LotatoConfig& cfg = LotatoConfig::instance();
-  if (ctx.argc < 1) {
-    ctx.printHelp();
-    return;
-  }
-  const char* tok1 = ctx.argv[0];
-  const char* tok2 = (ctx.argc >= 2) ? ctx.argv[1] : "";
-
-  char ssid_to_use[33] = {};
-  bool is_index = true;
-  for (const char* q = tok1; *q; q++) {
-    if (*q < '0' || *q > '9') {
-      is_index = false;
-      break;
-    }
-  }
-  lofi::Lofi& lf = lofi::Lofi::instance();
-  if (is_index && tok1[0] != '\0') {
-    int idx = atoi(tok1) - 1;
-    int32_t rssi;
-    if (idx < 0 || !lf.scanSnapshotEntry(idx, ssid_to_use, &rssi)) {
-      ctx.out.appendf("Err - index out of range (1..%d)\nRun: wifi scan first", lf.scanSnapshotCount());
-      return;
-    }
-  } else {
-    strncpy(ssid_to_use, tok1, sizeof(ssid_to_use) - 1);
-  }
-
-  char pwd_to_use[65] = {};
-  if (tok2[0] != '\0') {
-    strncpy(pwd_to_use, tok2, sizeof(pwd_to_use) - 1);
-    pwd_to_use[sizeof(pwd_to_use) - 1] = '\0';
-  } else {
-    cfg.getKnownWifiPassword(ssid_to_use, pwd_to_use, sizeof(pwd_to_use));
-  }
-
-  cfg.setWifi(ssid_to_use, pwd_to_use);
-  g_self->ingestor().restartAfterConfigChange();
-  lf.beginConnect(ssid_to_use, pwd_to_use);
-  ::lolog::LoLog::debug("lotato", "lotato CLI: wifi connecting ssid=%s modem_sleep=off", ssid_to_use);
-  ctx.out.appendf("Connecting to %s...", ssid_to_use);
-}
-
-void h_wifi_forget(locommand::Context& ctx) {
-  LotatoConfig& cfg = LotatoConfig::instance();
-  if (ctx.argc < 1) {
-    ctx.printHelp();
-    return;
-  }
-  if (!cfg.forgetKnownWifi(ctx.argv[0])) {
-    ctx.out.append("Err - SSID not in known list\n");
-    return;
-  }
-  ctx.out.append("OK\n");
-}
-
-const locommand::ArgSpec k_wifi_connect_args[] = {
-    {"n_or_ssid", "string", nullptr, true, "Scan index (1-based) or SSID"},
-    {"password", "secret", nullptr, false, "PSK if not already saved"},
-};
-
-const locommand::ArgSpec k_wifi_forget_args[] = {
-    {"ssid", "string", nullptr, true, "Network SSID to remove from known list"},
-};
-
-const locommand::ArgSpec k_ingest_args[] = {
-    {"n", "uint", nullptr, false, "Max entries to show (default: all)"},
-};
-
-const locommand::ArgSpec k_lotato_endpoint_args[] = {
-    {"url", "string", nullptr, true, "Ingest origin URL (same as config set lotato.ingest.url)"},
-};
-
-const locommand::ArgSpec k_lotato_auth_args[] = {
-    {"token", "secret", nullptr, true, "API bearer token (same as config set lotato.ingest.token)"},
-};
 
 }  // namespace
 
@@ -304,61 +79,30 @@ CliGateway& CliGateway::instance() {
 
 CliGateway::CliGateway() = default;
 
-void CliGateway::registerLotatoEngine() {
-  _eng_lotato.add("status", &h_status, nullptr, nullptr, "show lotato/ingest status");
-  _eng_lotato.add("pause", &h_pause, nullptr, nullptr, "pause ingest (shortcut for config)");
-  _eng_lotato.add("resume", &h_resume, nullptr, nullptr, "resume ingest (shortcut for config)");
-  _eng_lotato.addWithArgs("ingest", &h_ingest, k_ingest_args, 1, nullptr,
-                           "recent ingest POSTs (newest first)");
-  _eng_lotato.addWithArgs("endpoint", &h_endpoint, k_lotato_endpoint_args, 1, nullptr,
-                          "set ingest URL (alias: lotato.ingest.url)");
-  _eng_lotato.addWithArgs("auth", &h_auth, k_lotato_auth_args, 1, nullptr,
-                          "set API token (alias: lotato.ingest.token)");
-  _eng_lotato.setRootBrief("ingest status / history / endpoint / auth");
-}
-
-void CliGateway::registerWifiEngine() {
-  _eng_wifi.add("status", &h_wifi_status, nullptr, nullptr, "STA / saved SSID snapshot");
-  _eng_wifi.add("scan", &h_wifi_scan, nullptr, nullptr, "scan for APs (async reply)");
-  _eng_wifi.addWithArgs("connect", &h_wifi_connect, k_wifi_connect_args, 2, nullptr,
-                        "connect by index or SSID");
-  _eng_wifi.addWithArgs("forget", &h_wifi_forget, k_wifi_forget_args, 1, nullptr,
-                        "remove SSID from known list");
-  _eng_wifi.setRootBrief("WiFi STA scan/connect");
-}
+bool CliGateway::cliBusy() const { return LotatoCli::instance().cliBusy(); }
+void CliGateway::setCliBusy(bool v) { LotatoCli::instance().setCliBusy(v); }
 
 void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], mesh::Mesh* mesh) {
   g_self = this;
   _mesh = mesh;
   if (self_pub_key) memcpy(_self_pub_key, self_pub_key, sizeof(_self_pub_key));
 
-  // Stage 1 — platform bringup. VFS logs [E] for every fopen of a missing file; LoDB/LoSettings
-  // treat "missing" as normal (get returns NOT_FOUND), so silence the noise — real errors still log.
+  // Stage 1 — platform bringup.
   esp_log_level_set("vfs_api", ESP_LOG_NONE);
   LoStar::boot({{"/__int__", internal_fs}});
 
   // Stage 2 — Lotato stack.
   LotatoConfig::instance().load();
   lofi::Lofi::instance().begin();
-  _history.begin();
+  LotatoCli::instance().ingestHistory().begin();
 
   lofi::Lofi::instance().setScanCompleteCallback(&CliGateway::onWifiScanComplete, nullptr);
   lofi::Lofi::instance().setConnectCompleteCallback(&CliGateway::onWifiConnectComplete, nullptr);
 
-  losettings::ConfigHub::instance().bindConfigCli(_eng_config);
-  _eng_config.setRootBrief("LoSettings keys (ls/get/set/unset)");
-
-  registerLotatoEngine();
-  registerWifiEngine();
-
-  _router.clear();
-  _router.add(&_eng_lotato);
-  _router.add(&_eng_wifi);
-  _router.add(&_eng_config);
+  LotatoCli::instance().defaultRegister();
 
   lotato_register_sta_dns_override();
   if (lofi::Lofi::instance().knownWifiCount() >= 2) {
-    // Multiple known SSIDs: own reconnect timing to avoid fighting our failover.
     WiFi.setAutoReconnect(false);
   }
 
@@ -368,7 +112,7 @@ void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], 
 
 void CliGateway::tickServices() {
   lofi::Lofi::instance().serviceWifiScan();
-  _ingestor.serviceTick(_self_pub_key);
+  LotatoCli::instance().ingestor().serviceTick(self_id_from_pub_key(_self_pub_key));
   _reply_queue.service(millis(), *this);
 }
 
@@ -399,26 +143,26 @@ void CliGateway::onAdvertRecvInternal(const uint8_t pub_key[32], const uint8_t* 
   rec.gps_lat     = lat;
   rec.gps_lon     = lon;
   rec.magic       = LOTATO_NODE_MAGIC;
-  _ingestor.onAdvert(rec, _history, _self_pub_key);
+  LotatoCli::instance().ingestor().onAdvert(rec, LotatoCli::instance().ingestHistory(),
+                                             self_id_from_pub_key(_self_pub_key));
 }
 
 bool CliGateway::hasPendingTxInternal() const {
-  // Keep the radio awake whenever WiFi is configured so our scan/connect state machine isn't cut
-  // off by the host's sleep loop — host polls this before `board.sleep()`.
   if (LotatoConfig::instance().ssid()[0] != '\0') return true;
   if (!_reply_queue.empty()) return true;
-  return _ingestor.pendingQueueDepth() > 0;
+  return LotatoCli::instance().ingestor().pendingQueueDepth() > 0;
 }
 
 bool CliGateway::matchesAnyRoot(const char* command) const {
-  return _router.matchesAnyRoot(command) || _router.matchesGlobalHelp(command);
+  auto& router = LotatoCli::instance().router();
+  return router.matchesAnyRoot(command) || router.matchesGlobalHelp(command);
 }
 
 void CliGateway::handleAdminTxtCliInternal(uint32_t sender_ts, const uint8_t pub_key[32],
                                            const uint8_t secret[32], const uint8_t* out_path,
                                            uint8_t out_path_len, uint8_t path_hash_size,
                                            char* command, bool is_retry) {
-  if (is_retry) return;  // original packet will be resent via mesh; we own no state for it.
+  if (is_retry) return;
 
   if (::lolog::LoLog::isVerbose()) {
     size_t cmd_len = strlen(command);
@@ -431,7 +175,7 @@ void CliGateway::handleAdminTxtCliInternal(uint32_t sender_ts, const uint8_t pub
 
   _reply_scratch[0] = '\0';
 
-  if (_async_busy) {
+  if (LotatoCli::instance().cliBusy()) {
     strncpy(_reply_scratch, "Err - busy (operation in progress)", kCliReplyCap - 1);
     _reply_scratch[kCliReplyCap - 1] = '\0';
     ::lolog::LoLog::debug("lotato", "cli reply: reject (busy) cmd=%.60s", command);
@@ -447,9 +191,9 @@ void CliGateway::handleAdminTxtCliInternal(uint32_t sender_ts, const uint8_t pub
   memcpy(_route.secret, secret, 32);
   memcpy(_route.out_path, out_path, sizeof(_route.out_path));
 
-  dispatchCli(command, sender_ts, _reply_scratch);
+  dispatchCli(command, sender_ts, pub_key, _reply_scratch);
 
-  if (!_async_busy) _route.valid = false;
+  if (!LotatoCli::instance().cliBusy()) _route.valid = false;
 
   if (_reply_scratch[0] != '\0') {
     enqueueTxtCliReply(pub_key, secret, out_path, out_path_len, path_hash_size, sender_ts,
@@ -457,40 +201,42 @@ void CliGateway::handleAdminTxtCliInternal(uint32_t sender_ts, const uint8_t pub
   }
 }
 
-void CliGateway::dispatchCli(const char* command, uint32_t sender_ts, char* reply) {
+void CliGateway::dispatchCli(const char* command, uint32_t sender_ts, const uint8_t pub_key[32],
+                             char* reply) {
   if (!reply) return;
   reply[0] = '\0';
 
   UBaseType_t words = uxTaskGetStackHighWaterMark(nullptr);
   ::lolog::LoLog::info("lotato.stack", "cli pre: free_bytes=%u", (unsigned)(words * sizeof(StackType_t)));
 
-  CliCtx lctx{sender_ts};
+  lostar::NodeRef caller{};
+  fill_caller_ref(caller, pub_key);
+
   lomessage::Buffer buf(kDispatchBufferBytes);
-  if (_router.dispatch(command, buf, &lctx)) {
-    ::lolog::LoLog::debug("lotato", "lotato dispatch: out_len=%u truncated=%d", (unsigned)buf.length(),
-                          buf.truncated() ? 1 : 0);
-    deliverLongReply(sender_ts, buf.c_str(), reply);
+  if (LotatoCli::instance().dispatchLine(caller, sender_ts, command, buf)) {
+    ::lolog::LoLog::debug("lotato", "lotato dispatch: out_len=%u truncated=%d",
+                          (unsigned)buf.length(), buf.truncated() ? 1 : 0);
+    deliverLongReply(sender_ts, pub_key, buf.c_str(), reply);
   }
 
   words = uxTaskGetStackHighWaterMark(nullptr);
   ::lolog::LoLog::info("lotato.stack", "cli post: free_bytes=%u", (unsigned)(words * sizeof(StackType_t)));
 }
 
-void CliGateway::deliverLongReply(uint32_t sender_ts, const char* text, char* reply) {
+void CliGateway::deliverLongReply(uint32_t sender_ts, const uint8_t pub_key[32], const char* text,
+                                  char* reply) {
   reply[0] = '\0';
   if (!text || !text[0]) return;
   size_t n = strlen(text);
   if (n <= kMaxTxtChunk && n + 1 <= kCliReplyCap) {
-    // Fits in one wire-safe TXT_MSG chunk — let the caller's mesh send-path deliver it.
     memcpy(reply, text, n + 1);
     return;
   }
-  // Long reply: chunk via the FIFO. `_route.valid` is always set by the caller
-  // (`handleAdminTxtCliInternal`) before we get here; if that ever changes, we'd silently drop.
   if (_route.valid) {
     enqueueTxtCliReply(_route.pub_key, _route.secret, _route.out_path, _route.out_path_len,
                        _route.path_hash_size, sender_ts, text);
   }
+  (void)pub_key;
 }
 
 bool CliGateway::enqueueTxtCliReply(const uint8_t pub_key[32], const uint8_t secret[32],
@@ -520,7 +266,8 @@ bool CliGateway::enqueueTxtCliReply(const uint8_t pub_key[32], const uint8_t sec
 }
 
 lomessage::SendResult CliGateway::sendChunk(const uint8_t* data, size_t len, size_t chunk_idx,
-                                            size_t total_chunks, bool /*is_final*/, void* user_ctx) {
+                                            size_t total_chunks, bool /*is_final*/,
+                                            void* user_ctx) {
   auto* ctx = static_cast<CliReplyRoute*>(user_ctx);
   if (!ctx || !_mesh) return lomessage::SendResult::Abandon;
   if (len == 0 || len > kMaxTxtChunk) {
@@ -529,8 +276,6 @@ lomessage::SendResult CliGateway::sendChunk(const uint8_t* data, size_t len, siz
     return lomessage::SendResult::Abandon;
   }
 
-  // Build reply TXT_MSG: 4B ts + 1B flags + chunk. Timestamp must not collide with the requestor's
-  // (the client uses the pair as a packet-hash unique).
   uint8_t temp[5 + kMaxTxtChunk];
   uint32_t ts = _mesh->getRTCClock()->getCurrentTimeUnique();
   if (ts == ctx->sender_ts) ts++;
@@ -548,8 +293,9 @@ lomessage::SendResult CliGateway::sendChunk(const uint8_t* data, size_t len, siz
     _mesh->sendDirect(pkt, ctx->out_path, ctx->out_path_len, 0);
   }
 
-  ::lolog::LoLog::debug("lotato", "cli reply tx: chunk %u/%u bytes=%u path_len=%u", (unsigned)chunk_idx,
-                        (unsigned)total_chunks, (unsigned)len, (unsigned)ctx->out_path_len);
+  ::lolog::LoLog::debug("lotato", "cli reply tx: chunk %u/%u bytes=%u path_len=%u",
+                        (unsigned)chunk_idx, (unsigned)total_chunks, (unsigned)len,
+                        (unsigned)ctx->out_path_len);
   return lomessage::SendResult::Sent;
 }
 
@@ -573,7 +319,7 @@ void CliGateway::onWifiConnectComplete(void*, bool ok, const char* detail) {
   g_self->_route.valid = false;
 }
 
-/* ── Delegate runtime methods — thin translators between meshcore-native shapes and lotato core. ── */
+/* ── Delegate runtime methods — thin translators. ── */
 
 void Delegate::onAdvertRecv(const mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp,
                             const uint8_t* app_data, size_t app_data_len) {
@@ -600,7 +346,7 @@ bool Delegate::isBusy() const { return CliGateway::instance().hasPendingTxIntern
 
 /** Hook called by lofi when an async op marks the session busy/idle. */
 extern "C" void lofi_async_busy(bool busy) {
-  lotato::meshcore::CliGateway::instance().setCliBusy(busy);
+  lotato::LotatoCli::instance().setCliBusy(busy);
 }
 
-#endif  // ESP32
+#endif  // ESP32 && LOTATO_PLATFORM_MESHCORE

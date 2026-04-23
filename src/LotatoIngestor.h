@@ -4,6 +4,8 @@
 
 #include <Arduino.h>
 
+#include <lostar/NodeId.h>
+
 class LotatoIngestHistory;
 struct LotatoNodeRecord;
 
@@ -18,11 +20,13 @@ class LotatoIngestor {
 public:
   /**
    * Push entry point: called from the advert hook. Throttles via @p hist, merges into the
-   * pending batch (deduping by pub_key), and notifies the worker.
+   * pending batch (deduped by per-platform record key), and notifies the worker. The caller
+   * supplies its own canonical ingestor NodeId so the worker can stamp the `ingestor` field
+   * in both heartbeat and per-node payloads.
    */
-  void onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& hist, const uint8_t self_pub_key[32]);
-  /** Periodic tick that keeps the worker alive and caches @p self_pub_key for the heartbeat. */
-  void serviceTick(const uint8_t self_pub_key[32]);
+  void onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& hist, lostar::NodeId self_id);
+  /** Periodic tick that keeps the worker alive and caches @p self_id for the heartbeat. */
+  void serviceTick(lostar::NodeId self_id);
   /** Nodes in the current pending batch (0 if none). */
   uint8_t pendingQueueDepth() const;
   /** Drop pending batch and reset retry timer after URL/token/WiFi settings change. */
