@@ -1,7 +1,7 @@
 {
   "name": "lotato",
   "version": "0.1.0",
-  "description": "Lotato ingest, LoSettings integration, and ESP32 repeater helpers for MeshCore firmware.",
+  "description": "On-firmware MeshCore ingestor for Potato Mesh",
   "keywords": ["meshcore", "lotato", "esp32", "ingest", "potato"],
   "authors": [{ "name": "MeshEnvy", "maintainer": true }],
   "license": "MIT",
@@ -13,12 +13,11 @@
   "frameworks": ["arduino"],
   "platforms": ["espressif32"],
   "dependencies": [
-    { "name": "lo-star", "version": "symlink://../lo-star" },
-    { "name": "nanopb/Nanopb", "version": "0.4.9+1" }
+    { "name": "lo-star", "version": "https://github.com/MeshEnvy/lo-star" }
   ],
   "build": {
     "libArchive": false,
-    "srcDir": ".",
+    "srcDir": "src",
     "srcFilter": ["+<*.cpp>", "+<*.c>", "+<platforms/meshcore/*.cpp>"],
     "extraScript": "extra_script.py"
   }
