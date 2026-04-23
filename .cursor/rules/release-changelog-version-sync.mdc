@@ -1,0 +1,16 @@
+---
+description: Keep release updates in README changelog and root library.json in sync
+alwaysApply: true
+---
+
+# Release changelog and version sync
+
+When working in this repo, treat any request to do a version release (for example: "release", "cut a release", "bump version", "ship version X") as requiring both of the following updates in the same change:
+
+1. Update the root `README.md` changelog:
+   - Add or update entries under `### Unreleased` for pending changes.
+   - For an actual release, move relevant unreleased entries into a new version section.
+2. Update the root `library.json`:
+   - Set `version` to the released version.
+
+Do not perform a release-version change that updates only one of these files.
