@@ -9,4 +9,4 @@
 	url = https://github.com/l5yth/potato-mesh
 [submodule "lo-star"]
 	path = lo-star
-	url = git@github.com:MeshEnvy/lo-star.git
+	url = https://github.com/MeshEnvy/lo-star.git
