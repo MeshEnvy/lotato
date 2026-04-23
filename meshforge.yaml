@@ -2,7 +2,7 @@
 # Narrows the tag and target pickers when this repo is opened in MeshForge.
 meshforge:
   tags:
-    include: "^lotato-.*"
+    include: ".*"
   require_capabilities: [wifi]
   platforms:
     meshcore:
@@ -10,4 +10,3 @@ meshforge:
         include: "_repeater$"
     meshtastic:
       tags:
-        include: ".*"
