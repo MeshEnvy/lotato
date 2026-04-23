@@ -3,9 +3,18 @@ description: Keep release updates in README changelog and root library.json in s
 alwaysApply: true
 ---
 
-# Release changelog and version sync
+# Release changelog, version sync, and tag workflow
 
-When working in this repo, treat any request to do a version release (for example: "release", "cut a release", "bump version", "ship version X") as requiring both of the following updates in the same change:
+Use a two-step release process:
+
+1. **Prepare release**
+2. **Apply release tags**
+
+## Prepare release
+
+When working in this repo, treat any request to do a version release (for example: "release", "cut a release", "bump version", "ship version X") as a **prepare release** request unless the user explicitly asks to apply tags.
+
+Prepare release must include both updates in the same change:
 
 1. Update the root `README.md` changelog:
    - Add or update entries under `### Unreleased` for pending changes.
@@ -14,3 +23,14 @@ When working in this repo, treat any request to do a version release (for exampl
    - Set `version` to the released version.
 
 Do not perform a release-version change that updates only one of these files.
+Do not create tags during prepare release.
+
+## Apply release tags
+
+Only apply tags after the user explicitly says `apply tags` (or explicitly requests apply release tags).
+
+When applying release tags, use these formats:
+
+- `meshtastic` repo tag: `lotato-<version>-meshtastic-<version>`
+- `meshcore` repo tag: `lotato-<version>-meshcore-<version>`
+- Main repo tag: `<version>`
