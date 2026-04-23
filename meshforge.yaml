@@ -9,3 +9,5 @@ meshforge:
       targets:
         include: "_repeater$"
     meshtastic:
+      tags:
+        include: ".*"
