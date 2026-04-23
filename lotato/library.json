@@ -15,7 +15,7 @@
   "dependencies": [{ "name": "lo-star", "version": "symlink://../lo-star" }],
   "build": {
     "libArchive": false,
-    "srcDir": "src",
+    "srcDir": ".",
     "srcFilter": [
       "+<*.cpp>",
       "+<*.c>",
