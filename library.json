@@ -1,6 +1,6 @@
 {
   "name": "lotato",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "On-firmware MeshCore ingestor for Potato Mesh",
   "keywords": ["meshcore", "lotato", "esp32", "ingest", "potato"],
   "authors": [{ "name": "MeshEnvy", "maintainer": true }],
