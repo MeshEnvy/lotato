@@ -12,14 +12,7 @@
 
 #include <lostar/NodeId.h>
 
-/**
- * `LotatoNodeRecord` is the platform-specific advert/nodeinfo payload carried through the
- * shared ingest pipeline. The shared ingestor treats it as an opaque value (sizeof, memcpy);
- * it only ever interprets fields through `lotato::ingest_platform::*` hooks defined in each
- * platform's `IngestPlatform.h` (forwarded by `LotatoIngestPlatform.h`).
- */
-
-#include <LotatoIngestPlatform.h>
+#include <LotatoIngestor.h>  // LotatoNodeRecord typedef
 
 /**
  * Ephemeral ingest history keyed by `lostar::NodeId` (the web-canonical low bits). Entries are

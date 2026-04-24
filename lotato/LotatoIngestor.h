@@ -4,10 +4,17 @@
 
 #include <Arduino.h>
 
+#include <lostar/Types.h>
 #include <lostar/NodeId.h>
 
 class LotatoIngestHistory;
-struct LotatoNodeRecord;
+
+/**
+ * Lotato's ingest record is just a `lostar_NodeAdvert` POD. Platform specifics (meshtastic vs
+ * meshcore) are carried by `protocol` and interpreted by the JSON builder in
+ * `LotatoIngestPayload.cpp`.
+ */
+using LotatoNodeRecord = lostar_NodeAdvert;
 
 /** Apply lotato STA policy (public DNS override if LOTATO_STA_FORCE_PUBLIC_DNS=1). */
 void lotato_register_sta_dns_override();
@@ -19,10 +26,10 @@ void lotato_ingest_restart_after_config();
 class LotatoIngestor {
 public:
   /**
-   * Push entry point: called from the advert hook. Throttles via @p hist, merges into the
-   * pending batch (deduped by per-platform record key), and notifies the worker. The caller
-   * supplies its own canonical ingestor NodeId so the worker can stamp the `ingestor` field
-   * in both heartbeat and per-node payloads.
+   * Push entry point: called from the lostar advert observer. Throttles via @p hist, merges
+   * into the pending batch (deduped by @ref rec.num), notifies the worker. The caller supplies
+   * its own canonical ingestor NodeId so the worker can stamp the `ingestor` field in both
+   * heartbeat and per-node payloads.
    */
   void onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& hist, lostar::NodeId self_id);
   /** Periodic tick that keeps the worker alive and caches @p self_id for the heartbeat. */

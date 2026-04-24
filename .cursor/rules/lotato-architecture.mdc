@@ -1,92 +1,75 @@
 ---
-description: Lotato ingest architecture — providers vs mesh forks (greenfield)
-globs: lotato/**/*
+description: Lotato + lo-star + fork adapter three-layer architecture (greenfield)
+globs: lotato/**/*,lo-star/**/*,meshtastic/src/**,meshcore/examples/**
 alwaysApply: false
 ---
 
-# Lotato and mesh fork boundaries
+# Three-layer architecture: fork adapter → lostar → apps
 
-**What Lotato is:** A platform-agnostic, **on-device** potato-mesh ingestor (no sidecar) for Meshtastic and MeshCore. It targets ESP32 and any other **WiFi-capable** platform.
+**What Lotato is:** a platform-agnostic, on-device potato-mesh ingestor for Meshtastic and MeshCore. It runs on top of `lo-star`, an independent set of MCU-focused libraries (`locommand`, `lofi`, `louser`, `lofs`, `lolog`, `lomessage`, `losettings`, `lostar`, `lodb`). The `lostar` tree holds the host C-ABI (`lostar_install_host`, ingress, tick hooks), fixed-layout POD types, `lostar::router()`, plus `LoStar::boot` and `lostar::NodeId`.
 
-**Greenfield:** No data migration, no legacy compatibility, and **large breaking refactors are acceptable** when they simplify the design.
+**Greenfield:** no data migration, no legacy compat, breaking refactors welcome when they simplify the design.
+
+## Layers
+
+| Layer | Where | Vocabulary |
+|-------|-------|------------|
+| Fork | `meshtastic/src/`, `meshcore/src/`, `meshcore/examples/simple_repeater/` (except `lostar_adapter.{h,cpp}`) | fork-native types only (`meshtastic_MeshPacket`, `mesh::Packet`, nanopb-generated) |
+| Fork adapter | `meshtastic/src/lostar_adapter.{h,cpp}`, `meshcore/examples/simple_repeater/lostar_adapter.{h,cpp}` | **both** fork-native AND lostar PODs — the single translation point |
+| lo-star | `lo-star/**` | POD-only public headers; internal nanopb stays in each module |
+| Apps | `lotato/**` | POD-only (`lostar_*` structs, lo-star APIs); **no** fork-native types, **no** nanopb |
+
+The ODR hazard class is gone by construction: no TU outside a fork adapter sees both a fork-native type and a lo-star type compiled with potentially different preprocessor flavors.
+
+## What goes where
+
+- **Fork adapter only:** `mesh/generated/meshtastic/mesh.pb.h`, `Mesh.h`/`Packet.h`/`Identity.h`, `AdvertDataParser`, fork-native send primitives, chunked-reply FIFO (meshcore), per-caller encryption routes (meshcore), `lostar_host_ops` install, POD conversions, fork-specific guard policy via `locommand::Engine::setGuardFor`.
+- **`lo-star/lostar/`:** POD vocabulary (`lostar_TextDm`, `lostar_NodeAdvert`, `lostar_host_ops`, `lostar_deferred_reply`), dispatch, observer fanout, router singleton, busy-hint registry, tick-hook registry, and `LoStar::boot` / platform helpers.
+- **lo-star apps / caps (louser, lofi, future):** self-register their CLI engines with `lostar::router()`, install their own tick hooks / busy hints, use `lostar_deferred_reply` for async replies. Platform-independent.
+- **lotato:** `lotato::init(protocol, fs)` registers its engines, subscribes the ingestor to advert observers, installs tick + busy hints. Zero fork-native types, zero nanopb.
+
+## Boot sequence (both forks)
+
+1. Fork adapter's `lostar_*_install(...)` runs early: installs `lostar_host_ops`, calls `lotato::init(protocol, fs)`, `louser::init()`.
+2. `lofi::init()` either runs immediately (meshcore) or is deferred until after NimBLE comes up (meshtastic on ESP32) via `lostar_mt_start_wifi_after_ble()`.
+3. Fork adapter applies any fork-specific guard policy on top of the engines already registered by step 1 and 2.
+4. Per-event hooks (`lostar_*_on_text`, `lostar_*_on_advert`, `lostar_*_tick`) are called from the fork's normal event dispatch.
 
 ## Zero legacy code
 
-Lotato has **never shipped**. There are no deployed devices, no stored user data that matters, no external callers. Treat every refactor as if the old shape never existed.
+Lotato has never shipped. No deployed devices, no stored user data, no external callers.
 
 **Do not add any of the following, ever:**
 
-- Runtime cleanup of old files, old table names, old schemas (e.g. `fs->remove("/lotato-nodes.bin")`, "drop old table", "rename column X to Y on boot").
-- Compatibility shims, adapter methods, or "old API kept for callers that still pass a slot index".
-- Parameters retained "just in case" — if a field/arg is unused after the refactor, **delete it at every call site**.
-- Comments like "legacy", "pre-LoDB", "for backwards compat", "leftover from …" describing on-device behavior. If it's not needed, **remove the code**, don't annotate it.
-- `#ifdef`-gated old paths, dual reads/writes, or dual-schema support.
+- Runtime cleanup of old files / old table names / old schemas.
+- Compatibility shims, adapter methods kept "for callers that still pass …".
+- Parameters retained "just in case".
+- `#ifdef`-gated old paths, dual reads/writes, migration logic.
+- Comments like "legacy", "pre-LoDB", "for backwards compat" describing on-device behavior — just remove the code.
 
-**When you refactor a store / schema / API:**
+When refactoring a store / schema / API: change the shape, update every caller in the same change, delete the old fields. Dev devices with stale data wipe flash; that's acceptable.
 
-1. Change the shape.
-2. Update every caller to the new shape in the same change.
-3. Delete the old fields, old files, old code paths. Do **not** add migration logic. If a dev device has stale data, they can wipe flash — that is an acceptable outcome.
+## Invariants
 
-**If you catch yourself writing cleanup/migration code, stop.** Delete it and move on. The answer is always "the old thing never existed".
+These rules keep ODR hazards out of the build.
 
-**Example — BAD (do not write this):**
+- **Cross-boundary types are fixed-layout POD.** Every member of `lostar_*` structs is `uint8_t` / `uint16_t` / `uint32_t`, a fixed-size char array, or a raw pointer. No `#ifdef` inside struct definitions. No STL, no virtuals, no `pb_size_t`, no nanopb-generated types.
+- **No nanopb types in public lo-star headers.** Anything under `lo-star/**/include/**` must be safe to include from a TU that has not set `PB_FIELD_32BIT` (or sets it differently from lo-star's internals).
+- **Nanopb is module-internal.** Each protobuf domain (meshtastic fork, meshcore fork, lo-star internals) owns its own nanopb preprocessor state; the state never propagates across module boundaries because public headers don't expose nanopb types.
+- **Host-native types stay in their fork TU.** `meshtastic_MeshPacket` lives only in meshtastic fork TUs including `meshtastic/src/lostar_adapter.cpp`. Symmetric for meshcore's `mesh::Packet` / `mesh::Identity`. No lotato or lo-star TU ever sees them.
+- **Layout sentinels on both sides.** Both the adapter TU and `lo-star/lostar/Host.cpp` assert fixed sizes for `lostar_TextDm`, `lostar_NodeAdvert`, `lostar_host_ops`, and `lostar_deferred_reply`. Any drift is a compile error, not a runtime bug. `lostar_host_ops.size` provides runtime forward-compat for growing the vtable.
+- **Async replies route through `lostar_deferred_reply`.** lo-star libraries never call fork-specific reply functions; they invoke a deferred handle whose `fire` fn is fork-provided and whose `route_ctx` is fork-owned.
 
-```cpp
-void Store::begin(fs::FS* fs) {
-  // clean up orphaned pre-LoDB files
-  if (fs->exists("/lotato-nodes.bin")) fs->remove("/lotato-nodes.bin");
-  if (fs->exists("/lotato-nodes.bin.tmp")) fs->remove("/lotato-nodes.bin.tmp");
-  ...
-}
-```
-
-**Example — GOOD:**
-
-```cpp
-void Store::begin() {
-  ...
-}
-```
-
-## Where logic belongs
-
-| Layer | Put here |
-|-------|----------|
-| Protocol-specific ingest, framing, mapping to potato-mesh HTTP/payloads, most WiFi/client glue | `lotato/providers/meshtastic/` and `lotato/providers/meshcore/` (or equivalent under `lotato/providers/mesh*`) |
-| Forks (`meshtastic/`, `meshcore/`) | **Only** what must live there for **build, link, or platform HAL** reasons—thin wire-up, includes, build flags, a small adapter surface |
-
-## Rules of thumb
-
-- **Prefer new code in `lotato/`** (especially under `lotato/providers/`) over spreading changes through upstream-shaped trees.
-- In forks, aim for **minimal diffs**: registration, one or two call sites, optional weak hooks—**not** business logic that could live in a provider.
-- **Cross-platform:** isolate RTOS/SDK/Arduino specifics in **platform-specific providers** or small shims; keep shared ingest logic portable.
-- When you are editing **`meshcore/` or `meshtastic/`** for ingest or Lotato integration, **still** follow this split—move logic into `lotato/providers/` when it is not strictly required in the fork.
-
-## Build flag contract (greenfield)
+## Build flag contract
 
 - Lotato platform selection is **explicit and required**: set exactly one of `LOTATO_PLATFORM_MESHCORE=1` or `LOTATO_PLATFORM_MESHTASTIC=1`.
-- Do **not** use `LOTATO_ENABLED` for gating, compatibility, or derived toggles.
-- `lotato/extra_script.py` must fail fast when no `LOTATO_PLATFORM_*` define is present.
-- Integration call sites should key off the platform contract, not a secondary enable flag.
+- Fork adapter TUs are the only ones that gate on `LOTATO_PLATFORM_*` — everything else is platform-neutral.
+- Do **not** use a separate `LOTATO_ENABLED` flag.
+- No TU outside a fork adapter may define or depend on `PB_FIELD_32BIT`; lotato has zero nanopb contact, and lo-star's internals are self-consistent.
 
-## Examples
+## When you edit this repo
 
-```cpp
-// ❌ BAD — full ingest / JSON / HTTP flow inside meshcore/src/...
-void onSomeRadioEvent() {
-  // ... lots of potato-mesh-specific code ...
-}
-
-// ✅ GOOD — fork: delegate
-void onSomeRadioEvent() {
-  lotato::meshcore::Provider::onRadioEvent(ctx, event);
-}
-
-// ✅ GOOD — provider: real work in lotato/providers/meshcore/...
-```
-
-```cpp
-// ❌ BAD — Meshtastic module owns potato payload shaping
-// ✅ GOOD — meshtastic calls into lotato::meshtastic::Provider with a narrow API
-```
+- **lotato/** — add features here first. Consume lo-star / lostar APIs; do not reach into forks.
+- **lo-star/*** — platform-neutral modules; keep public headers POD-only. louser / lofi / future caps self-register with `lostar::router()` via their own `init()` and never call fork-specific reply paths.
+- **meshtastic/**, **meshcore/*** — minimal diffs: a single adapter TU plus a handful of call-site edits. Business logic lives in lotato or lo-star, never in a fork.
+- **Fork adapter TU** is the only place `meshtastic_MeshPacket` or `mesh::Packet` can meet `lostar_*`. Keep it small; it's a translator, not a place for app logic.

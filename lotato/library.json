@@ -18,9 +18,7 @@
     "srcDir": ".",
     "srcFilter": [
       "+<*.cpp>",
-      "+<*.c>",
-      "+<platforms/meshcore/*.cpp>",
-      "+<platforms/meshtastic/*.cpp>"
+      "+<*.c>"
     ],
     "extraScript": "extra_script.py"
   }

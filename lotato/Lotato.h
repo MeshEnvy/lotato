@@ -1,18 +1,33 @@
 #pragma once
 
+#include <lofs/FsBackend.h>
+#include <lostar/Types.h>
+
 /**
- * Public Lotato entry point. Consumers include only this header and call into the neutral
- * `Lotato::*` API (`init`, `delegate()`, …).
- *
- * The concrete platform delegate — MeshCore / Meshtastic today, more later — is selected by
- * the `LOTATO_PLATFORM_*` define injected by `extra_script.py`. Each delegate header provides
- * the neutral `Lotato::Delegate` typedef plus inline `Lotato::init` / `Lotato::delegate`.
+ * Public Lotato entry point. Lotato is a plain lo-star consumer: a fork adapter installs
+ * `lostar_host_ops` first, then calls `lotato::init()` to bring up the Potato Mesh ingest app
+ * on top of lostar. No host-native types appear in this header.
  */
 
-#if defined(LOTATO_PLATFORM_MESHCORE)
-#include "platforms/meshcore/MeshcoreCliGateway.h"
-#elif defined(LOTATO_PLATFORM_MESHTASTIC)
-#include "platforms/meshtastic/MeshtasticDelegate.h"
-#else
-#error "Lotato: define LOTATO_PLATFORM_MESHCORE=1 or LOTATO_PLATFORM_MESHTASTIC=1 for ingest."
-#endif
+namespace lotato {
+
+/**
+ * One-shot bringup. Safe to call multiple times (idempotent). Performs:
+ *   - LoStar boot (VFS, config hub; optionally binds @p internal_fs under `/__int__`)
+ *   - Loads LotatoConfig, opens ingest history
+ *   - Registers the `lotato` and `config` CLI engines with `lostar::router()`
+ *   - Subscribes the ingestor to `lostar_ingress_node_advert`
+ *   - Registers a busy hinter covering ingest queue depth + configured WiFi
+ *   - Registers a tick hook that services the ingestor each `lostar_tick()`
+ *
+ * @param host_protocol the protocol this firmware image speaks on-air. Used by the ingestor's
+ *   heartbeat to stamp the correct `protocol` field.
+ * @param internal_fs optional host-provided filesystem to mount as `/__int__`. Pass nullptr to
+ *   let LoFS use its platform default.
+ */
+void init(lostar_protocol host_protocol, lofs::FSys* internal_fs = nullptr);
+
+/** Protocol this lotato instance was initialized with. */
+lostar_protocol host_protocol();
+
+}  // namespace lotato

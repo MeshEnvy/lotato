@@ -181,6 +181,7 @@ void LotatoConfig::setIngestOrigin(const char* u) {
 
 extern "C" void lofi_on_lo_settings_changed(void) {
   LotatoConfig::instance().refreshFromLoSettings();
+  lotato_ingest_restart_after_config();
 }
 
 #endif  // ESP32

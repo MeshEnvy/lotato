@@ -2,7 +2,8 @@
 
 #ifdef ESP32
 
-#include <LotatoIngestPlatform.h>
+#include <Lotato.h>
+#include <LotatoIngestPayload.h>
 #include <LotatoConfig.h>
 #include <LotatoIngestHistory.h>
 #include <lolog/LoLog.h>
@@ -248,23 +249,26 @@ static bool build_ingestor_heartbeat_body(lostar::NodeId self_id, char* buf, siz
   lostar::format_canonical(self_id, node_id, sizeof(node_id));
   time_t t = time(nullptr);
   const bool unix_plausible = (t > (time_t)1700000000);
+  lostar_NodeAdvert host_rec{};
+  host_rec.protocol = (uint8_t)lotato::host_protocol();
   const char* ingestor_version =
 #ifdef LOTATO_INGESTOR_VERSION
       LOTATO_INGESTOR_VERSION;
 #else
-      lotato::ingest_platform::default_ingestor_version();
+      lotato::default_ingestor_version(host_rec);
 #endif
-  int n;
+  const char* proto_name = lotato::protocol_name(host_rec);
+  int         n;
   if (unix_plausible) {
     if (g_ingestor_start_unix == 0) g_ingestor_start_unix = (uint32_t)t;
     n = snprintf(buf, cap,
                  "{\"node_id\":\"%s\",\"start_time\":%lu,\"last_seen_time\":%lu,\"version\":\"%s\","
                  "\"protocol\":\"%s\"}",
                  node_id, (unsigned long)g_ingestor_start_unix, (unsigned long)t, ingestor_version,
-                 lotato::ingest_platform::protocol_name());
+                 proto_name);
   } else {
     n = snprintf(buf, cap, "{\"node_id\":\"%s\",\"version\":\"%s\",\"protocol\":\"%s\"}", node_id,
-                 ingestor_version, lotato::ingest_platform::protocol_name());
+                 ingestor_version, proto_name);
   }
   if (n <= 0 || (size_t)n >= cap) return false;
   *out_len = (uint16_t)n;
@@ -292,8 +296,10 @@ static void maybe_post_ingestor_heartbeat() {
 
   if (ok) {
     g_ingestor_heartbeat_ok_ms = millis();
+    lostar_NodeAdvert host_rec{};
+    host_rec.protocol = (uint8_t)lotato::host_protocol();
     ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor registered (%s)",
-                          lotato::ingest_platform::protocol_name());
+                          lotato::protocol_name(host_rec));
   } else {
     ::lolog::LoLog::debug("lotato", "lotato ingest: ingestor POST failed (will retry on next wake)");
   }
@@ -302,7 +308,7 @@ static void maybe_post_ingestor_heartbeat() {
 static bool build_record_fragment(lostar::NodeId self_id, const LotatoNodeRecord& rec, char* body,
                                   size_t body_cap, uint16_t* out_len, lostar::NodeId* id_out,
                                   char node_id_str[12]) {
-  if (!lotato::ingest_platform::build_node_payload(rec, self_id, body, body_cap, out_len, id_out)) {
+  if (!lotato::build_node_payload(rec, self_id, body, body_cap, out_len, id_out)) {
     return false;
   }
   if (node_id_str) lostar::format_canonical(id_out ? *id_out : 0u, node_id_str, 12);
@@ -476,7 +482,7 @@ void LotatoIngestor::onAdvert(const LotatoNodeRecord& rec, LotatoIngestHistory& 
   ensure_worker();
   if (!g_q_mtx) return;
 
-  lostar::NodeId rec_id = lotato::ingest_platform::node_id_from_record(rec);
+  lostar::NodeId rec_id = lotato::node_id_from_record(rec);
 
   xSemaphoreTake(g_q_mtx, portMAX_DELAY);
   g_batch_hist = &hist;

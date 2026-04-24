@@ -3,7 +3,7 @@
 #ifdef ESP32
 
 #include <LotatoConfig.h>
-#include <LotatoIngestPlatform.h>
+#include <LotatoIngestPayload.h>
 #include <algorithm>
 
 void LotatoIngestHistory::begin() {
@@ -14,7 +14,7 @@ void LotatoIngestHistory::recordPosted(const LotatoNodeRecord& rec, uint32_t now
   if (!_mtx) return;
   const size_t cap = (size_t)capacity();
   xSemaphoreTake(_mtx, portMAX_DELAY);
-  lostar::NodeId key = lotato::ingest_platform::node_id_from_record(rec);
+  lostar::NodeId key = lotato::node_id_from_record(rec);
   auto it = _rows.find(key);
   if (it != _rows.end()) {
     it->second.rec            = rec;
