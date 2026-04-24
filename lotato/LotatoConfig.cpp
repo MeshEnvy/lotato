@@ -179,9 +179,12 @@ void LotatoConfig::setIngestOrigin(const char* u) {
   ::lolog::LoLog::debug("lotato", "lotato cfg: ingest origin set (len=%u)", (unsigned)strlen(_url));
 }
 
+extern "C" __attribute__((weak)) void lofi_on_lo_settings_changed_platform(void) {}
+
 extern "C" void lofi_on_lo_settings_changed(void) {
   LotatoConfig::instance().refreshFromLoSettings();
   lotato_ingest_restart_after_config();
+  lofi_on_lo_settings_changed_platform();
 }
 
 #endif  // ESP32

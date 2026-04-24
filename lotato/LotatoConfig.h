@@ -58,3 +58,18 @@ private:
   char _url[257];
   char _token[129];
 };
+
+#ifdef ESP32
+#ifdef __cplusplus
+extern "C" {
+#endif
+/**
+ * Optional strong definition in fork firmware (e.g. Meshtastic `lostar_adapter`) to mirror
+ * lofi active WiFi into the host's persisted network config after LoSettings change.
+ * Weak no-op default lives in `LotatoConfig.cpp`.
+ */
+void lofi_on_lo_settings_changed_platform(void);
+#ifdef __cplusplus
+}
+#endif
+#endif
