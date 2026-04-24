@@ -63,6 +63,13 @@ void Store::begin() {
 - **Cross-platform:** isolate RTOS/SDK/Arduino specifics in **platform-specific providers** or small shims; keep shared ingest logic portable.
 - When you are editing **`meshcore/` or `meshtastic/`** for ingest or Lotato integration, **still** follow this split—move logic into `lotato/providers/` when it is not strictly required in the fork.
 
+## Build flag contract (greenfield)
+
+- Lotato platform selection is **explicit and required**: set exactly one of `LOTATO_PLATFORM_MESHCORE=1` or `LOTATO_PLATFORM_MESHTASTIC=1`.
+- Do **not** use `LOTATO_ENABLED` for gating, compatibility, or derived toggles.
+- `lotato/extra_script.py` must fail fast when no `LOTATO_PLATFORM_*` define is present.
+- Integration call sites should key off the platform contract, not a secondary enable flag.
+
 ## Examples
 
 ```cpp
