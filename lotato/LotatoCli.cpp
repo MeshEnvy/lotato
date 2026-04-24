@@ -6,6 +6,10 @@
 #include <WiFi.h>
 #include <cstring>
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <esp_task_wdt.h>
+#endif
+
 #include <LotatoConfig.h>
 #include <LotatoIngestPlatform.h>
 #include <lofi/Lofi.h>
@@ -16,6 +20,9 @@
 namespace lotato {
 
 namespace {
+
+/** Min interval between LoFi `serviceWifiScan()` calls from the host main loop. */
+constexpr uint32_t kLofiWifiScanServiceMs = 100;
 
 void runWifiScanCli(lomessage::Buffer& out) {
   auto& lf = lofi::Lofi::instance();
@@ -279,6 +286,20 @@ bool LotatoCli::dispatchLine(const lostar::NodeRef& caller, uint32_t /*sender_ts
   (void)&caller;
   void* app_ctx = const_cast<lostar::NodeRef*>(&caller);
   return _router.dispatch(command, out, app_ctx);
+}
+
+void tickLofiWifiScanIfDue() {
+  static uint32_t s_last_ms = 0;
+  const uint32_t now = millis();
+  if ((uint32_t)(now - s_last_ms) < kLofiWifiScanServiceMs) return;
+  s_last_ms = now;
+#if defined(ARDUINO_ARCH_ESP32)
+  esp_task_wdt_reset();
+#endif
+  lofi::Lofi::instance().serviceWifiScan();
+#if defined(ARDUINO_ARCH_ESP32)
+  esp_task_wdt_reset();
+#endif
 }
 
 }  // namespace lotato

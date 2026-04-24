@@ -17,14 +17,15 @@ def _has_lotato_platform(scons_env):
     return False
 
 
-# Platform-specific ingest delegates (see lotato/platforms/*): the consuming firmware opts in by
-# setting e.g. `-D LOTATO_PLATFORM_MESHCORE=1` or `-D LOTATO_PLATFORM_MESHTASTIC=1` in its
-# platformio.ini build_flags. When no choice was made, default to MeshCore so historical
-# consumers that never set LOTATO_PLATFORM_* keep working unchanged.
+# Platform-specific ingest delegates (see lotato/platforms/*): the consuming firmware must opt in
+# by setting e.g. `-D LOTATO_PLATFORM_MESHCORE=1` or `-D LOTATO_PLATFORM_MESHTASTIC=1`.
 explicit_choice = _has_lotato_platform(env) or _has_lotato_platform(projenv)
 
+if not explicit_choice:
+    raise RuntimeError(
+        "Lotato: define LOTATO_PLATFORM_MESHCORE=1 or LOTATO_PLATFORM_MESHTASTIC=1 in build_flags."
+    )
+
 for e in (env, projenv):
-    if not explicit_choice:
-        e.Append(CPPDEFINES=[("LOTATO_PLATFORM_MESHCORE", "1")])
     # Lotato-branded default advert name; fork respects `#ifndef ADVERT_NAME` so projects override.
     e.Append(CPPDEFINES=[("ADVERT_NAME", env.StringifyMacro("Lotato repeater"))])

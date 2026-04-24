@@ -1,9 +1,8 @@
-#include "MeshcoreCliGateway.h"
-
 #if defined(ESP32) && defined(LOTATO_PLATFORM_MESHCORE)
 
+#include "MeshcoreCliGateway.h"
+
 #include <Arduino.h>
-#include <WiFi.h>
 #include <cstdio>
 #include <cstring>
 
@@ -16,17 +15,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include <esp_log.h>
-
 #include <LotatoCli.h>
-#include <LotatoConfig.h>
-#include <LotatoIngestor.h>
-#include <LotatoIngestHistory.h>
+#include <LotatoCore.h>
 #include <lofi/Lofi.h>
 #include <lolog/LoLog.h>
 #include <lomessage/Buffer.h>
 #include <lomessage/Split.h>
-#include <lostar/LoStar.h>
 #include <lostar/NodeId.h>
 
 namespace lotato {
@@ -87,32 +81,21 @@ void CliGateway::begin(lofs::FSys* internal_fs, const uint8_t self_pub_key[32], 
   _mesh = mesh;
   if (self_pub_key) memcpy(_self_pub_key, self_pub_key, sizeof(_self_pub_key));
 
-  // Stage 1 — platform bringup.
-  esp_log_level_set("vfs_api", ESP_LOG_NONE);
-  LoStar::boot({{"/__int__", internal_fs}});
+  core::bringup(internal_fs);
 
-  // Stage 2 — Lotato stack.
-  LotatoConfig::instance().load();
-  lofi::Lofi::instance().begin();
-  LotatoCli::instance().ingestHistory().begin();
-
+  // MeshCore-specific async-reply wiring: route WiFi scan/connect completions back through the
+  // admin TXT reply FIFO (see `onWifiScanComplete` / `onWifiConnectComplete`).
   lofi::Lofi::instance().setScanCompleteCallback(&CliGateway::onWifiScanComplete, nullptr);
   lofi::Lofi::instance().setConnectCompleteCallback(&CliGateway::onWifiConnectComplete, nullptr);
 
-  LotatoCli::instance().defaultRegister();
-
-  lotato_register_sta_dns_override();
-  if (lofi::Lofi::instance().knownWifiCount() >= 2) {
-    WiFi.setAutoReconnect(false);
-  }
+  core::startNetwork();
 
   UBaseType_t words = uxTaskGetStackHighWaterMark(nullptr);
   ::lolog::LoLog::info("lotato.stack", "begin: free_bytes=%u", (unsigned)(words * sizeof(StackType_t)));
 }
 
 void CliGateway::tickServices() {
-  lofi::Lofi::instance().serviceWifiScan();
-  LotatoCli::instance().ingestor().serviceTick(self_id_from_pub_key(_self_pub_key));
+  core::service(self_id_from_pub_key(_self_pub_key));
   _reply_queue.service(millis(), *this);
 }
 
@@ -148,9 +131,8 @@ void CliGateway::onAdvertRecvInternal(const uint8_t pub_key[32], const uint8_t* 
 }
 
 bool CliGateway::hasPendingTxInternal() const {
-  if (LotatoConfig::instance().ssid()[0] != '\0') return true;
-  if (!_reply_queue.empty()) return true;
-  return LotatoCli::instance().ingestor().pendingQueueDepth() > 0;
+  if (core::hasPendingWork()) return true;
+  return !_reply_queue.empty();
 }
 
 bool CliGateway::matchesAnyRoot(const char* command) const {
@@ -343,10 +325,5 @@ bool Delegate::isBusy() const { return CliGateway::instance().hasPendingTxIntern
 
 }  // namespace meshcore
 }  // namespace lotato
-
-/** Hook called by lofi when an async op marks the session busy/idle. */
-extern "C" void lofi_async_busy(bool busy) {
-  lotato::LotatoCli::instance().setCliBusy(busy);
-}
 
 #endif  // ESP32 && LOTATO_PLATFORM_MESHCORE

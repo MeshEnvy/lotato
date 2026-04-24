@@ -77,6 +77,13 @@ private:
   bool _async_busy = false;
 };
 
+/**
+ * Poll the LoFi WiFi scan state machine from the host main loop. Internally throttled so we do not
+ * call into WiFi on every mesh iteration (which can starve loopTask and trip the ESP32 task WDT
+ * when NimBLE is up).
+ */
+void tickLofiWifiScanIfDue();
+
 }  // namespace lotato
 
 #endif  // ESP32

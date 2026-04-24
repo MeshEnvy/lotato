@@ -64,6 +64,7 @@ public:
   Delegate& delegate() { return _delegate; }
 
   uint32_t selfNodeNum() const { return _self_node_num; }
+  bool begun() const { return _begun; }
 
 private:
   Gateway() = default;
