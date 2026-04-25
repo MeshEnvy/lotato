@@ -58,7 +58,7 @@ void append_lotato_about_banner(lomessage::Buffer& out, void * /*user*/) {
 
 lostar_protocol host_protocol() { return g_host_protocol; }
 
-void init(lostar_protocol host_proto, lofs::FSys* internal_fs) {
+void init(lostar_protocol host_proto, lofs::FsVolume* internal_vol) {
   if (g_inited) return;
   g_inited        = true;
   g_host_protocol = host_proto;
@@ -66,8 +66,8 @@ void init(lostar_protocol host_proto, lofs::FSys* internal_fs) {
   // Silence ESP-IDF VFS open-failure spam; shared host-platform noise, not mesh-specific.
   esp_log_level_set("vfs_api", ESP_LOG_NONE);
 
-  if (internal_fs) {
-    LoStar::boot({{"/__int__", internal_fs}});
+  if (internal_vol) {
+    LoStar::boot({{"/__int__", internal_vol}});
   } else {
     LoStar::boot({});
   }

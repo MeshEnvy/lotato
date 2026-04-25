@@ -1,6 +1,6 @@
 #pragma once
 
-#include <lofs/FsBackend.h>
+#include <lofs/FsVolume.h>
 #include <lostar/Types.h>
 
 /**
@@ -13,7 +13,7 @@ namespace lotato {
 
 /**
  * One-shot bringup. Safe to call multiple times (idempotent). Performs:
- *   - LoStar boot (VFS, config hub; optionally binds @p internal_fs under `/__int__`)
+ *   - LoStar boot (VFS, config hub; optionally binds @p internal_vol under `/__int__`)
  *   - Loads LotatoConfig, opens ingest history
  *   - Registers `about` (via `loabout`, Lotato banner) plus the `lotato` and `config` CLI engines
  *   - Subscribes the ingestor to `lostar_ingress_node_advert`
@@ -22,10 +22,10 @@ namespace lotato {
  *
  * @param host_protocol the protocol this firmware image speaks on-air. Used by the ingestor's
  *   heartbeat to stamp the correct `protocol` field.
- * @param internal_fs optional host-provided filesystem to mount as `/__int__`. Pass nullptr to
+ * @param internal_vol optional host-provided `lofs::FsVolume` for `/__int__`. Pass nullptr to
  *   let LoFS use its platform default.
  */
-void init(lostar_protocol host_protocol, lofs::FSys* internal_fs = nullptr);
+void init(lostar_protocol host_protocol, lofs::FsVolume* internal_vol = nullptr);
 
 /** Protocol this lotato instance was initialized with. */
 lostar_protocol host_protocol();

@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Three-layer architecture: fork adapter → lostar → apps
 
-**What Lotato is:** a platform-agnostic, on-device potato-mesh ingestor for Meshtastic and MeshCore. It runs on top of `lo-star`, an independent set of MCU-focused libraries (`locommand`, `lofi`, `louser`, `lofs`, `lolog`, `lomessage`, `losettings`, `lostar`, `lodb`). The `lostar` tree holds the host C-ABI (`lostar_install_host`, ingress, tick hooks), fixed-layout POD types, `lostar::router()`, plus `LoStar::boot` and `lostar::NodeId`.
+**What Lotato is:** a platform-agnostic, on-device potato-mesh ingestor for Meshtastic and MeshCore. It runs on top of `lo-star`, an independent set of MCU-focused libraries (`locommand`, `lofi`, `louser`, `lofs`, `lolog`, `lomessage`, `losettings`, `lostar`, `lodb`). The `lostar` tree holds the host C-ABI (`lostar_install_host`, ingress, tick hooks), fixed-layout POD types, `lostar::router()`, plus `LoStar::boot` (which delegates VFS mount policy to **`lofs::mount_platform_volumes()`** in `lofs/platform/`, not lostar) and `lostar::NodeId`.
 
 **Greenfield:** no data migration, no legacy compat, breaking refactors welcome when they simplify the design.
 
@@ -24,7 +24,8 @@ The ODR hazard class is gone by construction: no TU outside a fork adapter sees 
 ## What goes where
 
 - **Fork adapter only:** `mesh/generated/meshtastic/mesh.pb.h`, `Mesh.h`/`Packet.h`/`Identity.h`, `AdvertDataParser`, fork-native send primitives, chunked-reply FIFO (meshcore), per-caller encryption routes (meshcore), `lostar_host_ops` install, POD conversions, fork-specific guard policy via `locommand::Engine::setGuardFor`.
-- **`lo-star/lostar/`:** POD vocabulary (`lostar_TextDm`, `lostar_NodeAdvert`, `lostar_host_ops`, `lostar_deferred_reply`), dispatch, observer fanout, router singleton, busy-hint registry, tick-hook registry, and `LoStar::boot` / platform helpers.
+- **`lo-star/lostar/`:** POD vocabulary (`lostar_TextDm`, `lostar_NodeAdvert`, `lostar_host_ops`, `lostar_deferred_reply`), dispatch, observer fanout, router singleton, busy-hint registry, tick-hook registry, and `LoStar::boot` (orchestration only — no mount policy).
+- **`lo-star/lofs/platform/`:** target-aware LoFS **mount orchestration** (`mount_platform_volumes`): reads `capabilities.h` + backend singletons, calls `LoFS::mount` for `/__int__`, `/__ext__`, `/__sd__`, `/__ram__`. Split or extend this layer per arch if policy diverges.
 - **lo-star apps / caps (louser, lofi, future):** self-register their CLI engines with `lostar::router()`, install their own tick hooks / busy hints, use `lostar_deferred_reply` for async replies. Platform-independent.
 - **lotato:** `lotato::init(protocol, internal_vol)` registers its engines, subscribes the ingestor to advert observers, installs tick + busy hints. Zero fork-native types, zero nanopb.
 
@@ -79,6 +80,17 @@ Use one convention per layer so guards stay obvious.
 | **`NRF52_PLATFORM`**, **`RP2040_PLATFORM`**, **`STM32_PLATFORM`** | Meshcore arch sections | Meshcore non-ESP32 targets only. |
 
 **`ESP32` vs `ARCH_ESP32`:** `ESP32` answers “Arduino Espressif core?” `ARCH_ESP32` answers “this Meshtastic/Meshcore ESP32 product build?” LoFS backends and similar should key off **`ARCH_ESP32`** (and meshcore’s other `*_PLATFORM` macros) so behavior matches PlatformIO, not only the core’s optional defines.
+
+## LoFS: `/__ext__`, `/__sd__`, and `LOFS_CAP_*`
+
+Defaults in `lo-star/lofs/include/lofs/capabilities.h` are **`LOFS_CAP_EXT=0`**, **`LOFS_CAP_SD=0`**. Each product image sets them explicitly in PlatformIO (`-DLOFS_CAP_EXT=1`, `-DLOFS_CAP_SD=1`, …). No inference from `QSPIFLASH`, `HAS_SDCARD`, or other fork macros.
+
+| Macro | Meaning |
+|-------|---------|
+| **`LOFS_CAP_EXT`** | When `1`, `/__ext__` uses dedicated external flash if `ExternalFlashBackend::hasDedicatedVolume()`; **otherwise internal** on `/__ext__`. When `0`, `/__ext__` is **always internal** so paths stay valid. |
+| **`LOFS_CAP_SD`** | When `1`, mount `/__sd__` and **`mount_platform_volumes()` returns false** if no working card (LoStar boot may `abort()`). When `0`, **`/__sd__` is not mounted**. |
+
+**`lofs::mount_platform_volumes()`** (`lofs/platform/MountVolumes.cpp`): `/__int__` when internal available; `/__ext__` per table above; `/__sd__` only if `LOFS_CAP_SD`; `/__ram__` unchanged.
 
 ## When you edit this repo
 
