@@ -18,6 +18,7 @@
 #include <lostar/Host.h>
 #include <lostar/LoStar.h>
 #include <lostar/NodeId.h>
+#include <lostar/Router.h>
 
 namespace lotato {
 
@@ -84,6 +85,7 @@ void init(lostar_protocol host_proto, lofs::FSys* internal_fs) {
 
   loabout::set_banner_fn(&append_lotato_about_banner, nullptr);
   loabout::init();
+  lostar::router().setHelpBanner(&loabout::append_banner);
 }
 
 }  // namespace lotato
