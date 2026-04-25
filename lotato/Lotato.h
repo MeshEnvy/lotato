@@ -15,7 +15,7 @@ namespace lotato {
  * One-shot bringup. Safe to call multiple times (idempotent). Performs:
  *   - LoStar boot (VFS, config hub; optionally binds @p internal_fs under `/__int__`)
  *   - Loads LotatoConfig, opens ingest history
- *   - Registers the `lotato` and `config` CLI engines with `lostar::router()`
+ *   - Registers `about` (via `loabout`, Lotato banner) plus the `lotato` and `config` CLI engines
  *   - Subscribes the ingestor to `lostar_ingress_node_advert`
  *   - Registers a busy hinter covering ingest queue depth + configured WiFi
  *   - Registers a tick hook that services the ingestor each `lostar_tick()`

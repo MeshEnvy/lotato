@@ -10,6 +10,7 @@
 #include <LotatoConfig.h>
 #include <LotatoIngestHistory.h>
 #include <LotatoIngestor.h>
+#include <loabout/LoAbout.h>
 #include <lofi/Lofi.h>
 #include <lolog/LoLog.h>
 #include <lostar/AdvertObserver.h>
@@ -21,6 +22,10 @@
 namespace lotato {
 
 namespace {
+
+#ifndef LOTATO_VERSION_STRING
+#define LOTATO_VERSION_STRING "0.2.0-rc.1"
+#endif
 
 bool            g_inited = false;
 lostar_protocol g_host_protocol = LOSTAR_PROTOCOL_UNKNOWN;
@@ -42,6 +47,11 @@ bool busy_hint(void * /*ctx*/) {
 /** Tick hook: keep the ingestor worker alive and caching self-id. */
 void tick(void * /*ctx*/) {
   LotatoCli::instance().ingestor().serviceTick(lostar_self_nodenum());
+}
+
+void append_lotato_about_banner(lomessage::Buffer& out, void * /*user*/) {
+  out.append("Lotato v" LOTATO_VERSION_STRING ".\n");
+  out.append("~~the Potato Mesh ingestor~~\n");
 }
 
 }  // namespace
@@ -71,6 +81,9 @@ void init(lostar_protocol host_proto, lofs::FSys* internal_fs) {
   lostar_register_advert_observer(&on_advert, nullptr);
   lostar_register_busy_hint(&busy_hint, nullptr);
   lostar_register_tick_hook(&tick, nullptr);
+
+  loabout::set_banner_fn(&append_lotato_about_banner, nullptr);
+  loabout::init();
 }
 
 }  // namespace lotato
