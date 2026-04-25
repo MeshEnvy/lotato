@@ -51,7 +51,7 @@ void tick(void * /*ctx*/) {
 }
 
 void append_lotato_about_banner(lomessage::Buffer& out, void * /*user*/) {
-  out.append("Lotato v" LOTATO_VERSION_STRING ".\n");
+  out.append("Lotato v" LOTATO_VERSION_STRING "\n");
   out.append("~~the Potato Mesh ingestor~~\n");
 }
 

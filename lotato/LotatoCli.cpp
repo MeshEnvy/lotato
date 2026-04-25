@@ -140,14 +140,14 @@ LotatoCli::LotatoCli() = default;
 
 void LotatoCli::registerLotatoEngine() {
   _eng_lotato.add("status", &h_status, nullptr, nullptr, "show lotato/ingest status");
-  _eng_lotato.add("pause", &h_pause, nullptr, nullptr, "pause ingest (shortcut for config)");
-  _eng_lotato.add("resume", &h_resume, nullptr, nullptr, "resume ingest (shortcut for config)");
+  _eng_lotato.add("pause", &h_pause, nullptr, nullptr, "pause ingest");
+  _eng_lotato.add("resume", &h_resume, nullptr, nullptr, "resume ingest");
   _eng_lotato.addWithArgs("ingest", &h_ingest, k_ingest_args, 1, nullptr,
                            "recent ingest POSTs (newest first)");
   _eng_lotato.addWithArgs("endpoint", &h_endpoint, k_lotato_endpoint_args, 1, nullptr,
-                          "set ingest URL (config key lotato.ingest.url)");
+                          "set ingest URL");
   _eng_lotato.addWithArgs("auth", &h_auth, k_lotato_auth_args, 1, nullptr,
-                          "set API token (config key lotato.ingest.token)");
+                          "set API token");
   _eng_lotato.setRootBrief("ingest status / history / endpoint / auth");
 }
 
