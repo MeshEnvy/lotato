@@ -26,11 +26,11 @@ The ODR hazard class is gone by construction: no TU outside a fork adapter sees 
 - **Fork adapter only:** `mesh/generated/meshtastic/mesh.pb.h`, `Mesh.h`/`Packet.h`/`Identity.h`, `AdvertDataParser`, fork-native send primitives, chunked-reply FIFO (meshcore), per-caller encryption routes (meshcore), `lostar_host_ops` install, POD conversions, fork-specific guard policy via `locommand::Engine::setGuardFor`.
 - **`lo-star/lostar/`:** POD vocabulary (`lostar_TextDm`, `lostar_NodeAdvert`, `lostar_host_ops`, `lostar_deferred_reply`), dispatch, observer fanout, router singleton, busy-hint registry, tick-hook registry, and `LoStar::boot` / platform helpers.
 - **lo-star apps / caps (louser, lofi, future):** self-register their CLI engines with `lostar::router()`, install their own tick hooks / busy hints, use `lostar_deferred_reply` for async replies. Platform-independent.
-- **lotato:** `lotato::init(protocol, fs)` registers its engines, subscribes the ingestor to advert observers, installs tick + busy hints. Zero fork-native types, zero nanopb.
+- **lotato:** `lotato::init(protocol, internal_vol)` registers its engines, subscribes the ingestor to advert observers, installs tick + busy hints. Zero fork-native types, zero nanopb.
 
 ## Boot sequence (both forks)
 
-1. Fork adapter's `lostar_*_install(...)` runs early: installs `lostar_host_ops`, calls `lotato::init(protocol, fs)`, `louser::init()`.
+1. Fork adapter's `lostar_*_install(...)` runs early: installs `lostar_host_ops`, binds the host `fs::FS*` to an internal `ArduinoFsVolume` (inside the adapter `.cpp` only), calls `lotato::init(protocol, FsVolume*)`, then `louser::init()`. Fork call sites pass the concrete filesystem pointer (`&FSCom`, or meshcore `MyMesh`'s `_fs` as `fs::FS*`); they do not construct `ArduinoFsVolume` or call `bindFs`.
 2. `lofi::init()` runs from the fork adapter install path (`lostar_mt_install` on meshtastic; meshcore equivalent after host bringup). Meshtastic fork uses `MESHTASTIC_EXCLUDE_BLUETOOTH` on `esp32_base`; if BLE is re-enabled on ESP32, defer `lofi::init()` until after NimBLE::init for coexistence.
 3. Fork adapter applies any fork-specific guard policy on top of the engines already registered by step 1 and 2.
 4. Per-event hooks (`lostar_*_on_text`, `lostar_*_on_advert`, `lostar_*_tick`) are called from the fork's normal event dispatch.
@@ -66,6 +66,19 @@ These rules keep ODR hazards out of the build.
 - Fork adapter TUs are the only ones that gate on `LOTATO_PLATFORM_*` — everything else is platform-neutral.
 - Do **not** use a separate `LOTATO_ENABLED` flag.
 - No TU outside a fork adapter may define or depend on `PB_FIELD_32BIT`; lotato has zero nanopb contact, and lo-star's internals are self-consistent.
+
+## Preprocessor flags: which symbol when
+
+Use one convention per layer so guards stay obvious.
+
+| Symbol | Where it comes from | Use for |
+|--------|---------------------|---------|
+| **`LOTATO_PLATFORM_MESHCORE`** / **`LOTATO_PLATFORM_MESHTASTIC`** | PlatformIO on Lotato-enabled envs only | **Fork** code and fork adapter public headers: “this image includes Lotato.” Today Lotato is enabled only on **ESP32-class** PlatformIO mixins (`meshcore` `[esp32_base]`, `meshtastic` `[esp32_base]`). At a Lotato call site, **`#if defined(LOTATO_PLATFORM_…)` alone is enough** — do not also require `ESP32` unless the block uses an Arduino macro that exists outside Lotato builds. |
+| **`ESP32`** / **`ARDUINO_ARCH_ESP32`** | Arduino-ESP32 core | Headers/APIs that follow upstream Arduino (e.g. `lostar_adapter.{h,cpp}` guard the whole adapter on `#ifdef ESP32` because the adapter is only built for that core today). |
+| **`ARCH_ESP32`** | `-DARCH_ESP32` in fork ESP32 PlatformIO + Meshtastic `architecture.h` | **lo-star / lotato** and any TU that does not include `architecture.h`: “ESP32 fork firmware” without relying on which core macro the board package defined. Prefer this over a fork-specific `ESP32_PLATFORM`-style name. |
+| **`NRF52_PLATFORM`**, **`RP2040_PLATFORM`**, **`STM32_PLATFORM`** | Meshcore arch sections | Meshcore non-ESP32 targets only. |
+
+**`ESP32` vs `ARCH_ESP32`:** `ESP32` answers “Arduino Espressif core?” `ARCH_ESP32` answers “this Meshtastic/Meshcore ESP32 product build?” LoFS backends and similar should key off **`ARCH_ESP32`** (and meshcore’s other `*_PLATFORM` macros) so behavior matches PlatformIO, not only the core’s optional defines.
 
 ## When you edit this repo
 
