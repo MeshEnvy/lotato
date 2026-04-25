@@ -34,11 +34,11 @@
 #define LOTATO_HTTP_RETRY_DELAY_MS 400
 #endif
 #ifndef LOTATO_INGEST_WORKER_STACK
-#define LOTATO_INGEST_WORKER_STACK 12288
+#define LOTATO_INGEST_WORKER_STACK 6144
 #endif
 /** Max JSON body size for one /api/nodes batch POST (ESP32 heap). */
 #ifndef LOTATO_INGEST_BODY_CAP
-#define LOTATO_INGEST_BODY_CAP 4096
+#define LOTATO_INGEST_BODY_CAP 2048
 #endif
 /** Max node entries merged into one POST (also limited by body cap). */
 #ifndef LOTATO_INGEST_BATCH_MAX_SLOTS

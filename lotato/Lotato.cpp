@@ -65,6 +65,7 @@ void init(lostar_protocol host_proto, lofs::FsVolume* internal_vol) {
 
   // Silence ESP-IDF VFS open-failure spam; shared host-platform noise, not mesh-specific.
   esp_log_level_set("vfs_api", ESP_LOG_NONE);
+  esp_log_level_set("mdns", ESP_LOG_NONE);
 
   if (internal_vol) {
     LoStar::boot({{"/__int__", internal_vol}});
