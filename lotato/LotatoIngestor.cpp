@@ -33,8 +33,9 @@
 #ifndef LOTATO_HTTP_RETRY_DELAY_MS
 #define LOTATO_HTTP_RETRY_DELAY_MS 400
 #endif
+/** esp_http_client + mbedTLS (x509/ECDSA) during TLS handshake needs a deep stack on ESP32. */
 #ifndef LOTATO_INGEST_WORKER_STACK
-#define LOTATO_INGEST_WORKER_STACK 6144
+#define LOTATO_INGEST_WORKER_STACK 8192
 #endif
 /** Max JSON body size for one /api/nodes batch POST (ESP32 heap). */
 #ifndef LOTATO_INGEST_BODY_CAP
