@@ -145,9 +145,9 @@ void LotatoCli::registerLotatoEngine() {
   _eng_lotato.addWithArgs("ingest", &h_ingest, k_ingest_args, 1, nullptr,
                            "recent ingest POSTs (newest first)");
   _eng_lotato.addWithArgs("endpoint", &h_endpoint, k_lotato_endpoint_args, 1, nullptr,
-                          "set ingest URL (alias: lotato.ingest.url)");
+                          "set ingest URL (config key lotato.ingest.url)");
   _eng_lotato.addWithArgs("auth", &h_auth, k_lotato_auth_args, 1, nullptr,
-                          "set API token (alias: lotato.ingest.token)");
+                          "set API token (config key lotato.ingest.token)");
   _eng_lotato.setRootBrief("ingest status / history / endpoint / auth");
 }
 
