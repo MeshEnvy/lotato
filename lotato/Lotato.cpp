@@ -3,7 +3,6 @@
 #ifdef ESP32
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_log.h>
 
 #include <LotatoCli.h>

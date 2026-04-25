@@ -31,7 +31,7 @@ The ODR hazard class is gone by construction: no TU outside a fork adapter sees 
 ## Boot sequence (both forks)
 
 1. Fork adapter's `lostar_*_install(...)` runs early: installs `lostar_host_ops`, calls `lotato::init(protocol, fs)`, `louser::init()`.
-2. `lofi::init()` either runs immediately (meshcore) or is deferred until after NimBLE comes up (meshtastic on ESP32) via `lostar_mt_start_wifi_after_ble()`.
+2. `lofi::init()` runs from the fork adapter install path (`lostar_mt_install` on meshtastic; meshcore equivalent after host bringup). Meshtastic fork uses `MESHTASTIC_EXCLUDE_BLUETOOTH` on `esp32_base`; if BLE is re-enabled on ESP32, defer `lofi::init()` until after NimBLE::init for coexistence.
 3. Fork adapter applies any fork-specific guard policy on top of the engines already registered by step 1 and 2.
 4. Per-event hooks (`lostar_*_on_text`, `lostar_*_on_advert`, `lostar_*_tick`) are called from the fork's normal event dispatch.
 
